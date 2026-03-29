@@ -11,6 +11,13 @@ export type AppSession = {
 export type LocalRecordStatus = "pending" | "syncing" | "synced" | "failed";
 export type QueueStatus = "pending" | "syncing" | "failed";
 
+export type MilestoneStatus = 
+  | "pending"            // NGO hasn't submitted evidence
+  | "submitted"          // Evidence uploaded, waiting for CA
+  | "approved"           // CA approved, payment pending
+  | "payment_initiated"  // CA uploaded payment receipt
+  | "paid";              // NGO uploaded received receipt, UNLOCKS next
+
 export type LocalRecord = {
   id: string;
   deviceId: string;
@@ -39,7 +46,21 @@ export type LocalMediaRecord = {
   size: number;
   kind: "image" | "video";
   blob: Blob;
+  proofHash: string | null; // SHA256 of the blob for immutability check
   createdAt: string;
+};
+
+export type LocalMilestone = {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string | null;
+  milestoneOrder: number;
+  status: MilestoneStatus;
+  amount: number;
+  paymentReceiptUrl: string | null; // URL of CA's receipt (from sync)
+  ngoReceiptId: string | null;       // ID of NGO's acknowledgement receipt
+  updatedAt: string;
 };
 
 export type SyncQueueItem = {
