@@ -1,6 +1,7 @@
 import Dexie, { type Table } from "dexie";
 import type {
   LocalMediaRecord,
+  LocalMilestone,
   LocalRecord,
   ProjectDraft,
   RemoteRecord,
@@ -15,6 +16,7 @@ class NavadrishtiDB extends Dexie {
   syncLog!: Table<SyncLogEntry, string>;
   remoteRecords!: Table<RemoteRecord, string>;
   projectDrafts!: Table<ProjectDraft, string>;
+  milestones!: Table<LocalMilestone, string>;
 
   constructor() {
     super("navadrishti-field-db");
@@ -44,13 +46,14 @@ class NavadrishtiDB extends Dexie {
       projectDrafts: "id, ngoId, projectId, updatedAt"
     });
 
-    this.version(4).stores({
+    this.version(5).stores({
       recordsLocal: "id, deviceId, status, userId, projectId, submittedAtDevice",
       mediaLocal: "id, recordId, kind, createdAt",
       syncQueue: "id, recordId, status, nextAttemptAt, attempts",
       syncLog: "id, recordId, createdAt",
       remoteRecords: "id, &sourceRecordId, projectId, syncedAt, submittedAtDevice, receivedAtServer",
-      projectDrafts: "id, ngoId, projectId, updatedAt"
+      projectDrafts: "id, ngoId, projectId, updatedAt",
+      milestones: "id, projectId, milestoneOrder, status"
     });
   }
 }

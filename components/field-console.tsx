@@ -5,38 +5,11 @@ import { FormEvent, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { useAppContext } from "@/components/app-provider";
 import { MediaPreview } from "@/components/media-preview";
+import { calculateHash } from "@/lib/crypto";
 import { db } from "@/lib/db";
 import { getDeviceId } from "@/lib/device";
-import type { LocalMediaRecord, LocalRecordWithMedia } from "@/lib/types";
-
-async function getCurrentPosition() {
-  if (!("geolocation" in navigator)) {
-    return null;
-  }
-
-  return new Promise<{ latitude: number; longitude: number } | null>((resolve) => {
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        resolve({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude
-        });
-      },
-      () => resolve(null),
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
-    );
-  });
-}
-
-function formatBytes(size: number) {
-  if (size < 1024) {
-    return `${size} B`;
-  }
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(1)} KB`;
-  }
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
+import { formatBytes, getCurrentPosition } from "../lib/utils";
+import type { LocalMediaRecord, LocalRecord, LocalRecordWithMedia } from "@/lib/types";
 
 function StatusPill({ status }: { status: LocalRecordWithMedia["status"] }) {
   return <span className={`pill ${status}`}>{status}</span>;
@@ -44,17 +17,23 @@ function StatusPill({ status }: { status: LocalRecordWithMedia["status"] }) {
 
 export function FieldConsole() {
   const { ready, session, isOnline, isSyncing, syncNow, signOut } = useAppContext();
-  const [projectId, setProjectId] = useState("PRJ-NAVA-001");
-  const [projectName, setProjectName] = useState("Ward upgrade evidence");
-  const [milestoneId, setMilestoneId] = useState("MS-01");
-  const [beneficiaryName, setBeneficiaryName] = useState("Uma Devi");
+  const [beneficiaryName, setBeneficiaryName] = useState("");
   const [interactionType, setInteractionType] = useState<LocalRecordWithMedia["interactionType"]>("visit");
-  const [notes, setNotes] = useState("Completed plumbing repair and handed over final walkthrough.");
+  const [notes, setNotes] = useState("");
   const [captureGps, setCaptureGps] = useState(true);
   const [files, setFiles] = useState<File[]>([]);
   const [submitState, setSubmitState] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [deviceId] = useState(() => getDeviceId());
+
+  const milestones = useLiveQuery(async () => {
+    return db.milestones.orderBy("milestoneOrder").toArray();
+  }, [], []);
+
+  const activeMilestone = useMemo(() => {
+    if (!milestones || milestones.length === 0) return null;
+    return milestones.find((ms) => ms.status !== "paid") || milestones[milestones.length - 1];
+  }, [milestones]);
 
   const records = useLiveQuery(async () => {
     const localRecords = await db.recordsLocal.orderBy("submittedAtDevice").reverse().toArray();
@@ -81,7 +60,7 @@ export function FieldConsole() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!session || session.role !== "field") {
+    if (!session || session.role !== "field" || !activeMilestone) {
       return;
     }
 
@@ -92,42 +71,46 @@ export function FieldConsole() {
       const coords = captureGps ? await getCurrentPosition() : null;
       const recordId = crypto.randomUUID();
       const createdAt = new Date().toISOString();
-      const mediaEntries: LocalMediaRecord[] = files.map((file) => ({
-        id: crypto.randomUUID(),
-        recordId,
-        fileName: file.name,
-        mimeType: file.type || "application/octet-stream",
-        size: file.size,
-        kind: file.type.startsWith("video/") ? "video" : "image",
-        blob: file,
-        createdAt
-      }));
+      
+      const mediaEntries: LocalMediaRecord[] = await Promise.all(
+        files.map(async (file) => ({
+          id: crypto.randomUUID(),
+          recordId,
+          fileName: file.name,
+          mimeType: file.type || "application/octet-stream",
+          size: file.size,
+          kind: file.type.startsWith("video/") ? "video" : "image",
+          blob: file,
+          proofHash: await calculateHash(file),
+          createdAt
+        }))
+      );
 
-      await db.transaction("rw", db.recordsLocal, db.mediaLocal, db.syncQueue, db.syncLog, async () => {
-        await db.recordsLocal.add({
-          id: recordId,
-          deviceId,
-          userId: session.id,
-          userName: session.name,
-          projectId: projectId.trim(),
-          projectName: projectName.trim(),
-          milestoneId: milestoneId.trim() ? milestoneId.trim() : null,
-          beneficiaryName: beneficiaryName.trim(),
-          interactionType,
-          notes: notes.trim(),
-          gpsLat: coords?.latitude ?? null,
-          gpsLng: coords?.longitude ?? null,
-          status: "pending",
-          createdAtDevice: createdAt,
-          submittedAtDevice: createdAt,
-          syncedAt: null,
-          lastError: null
-        });
+      const record: LocalRecord = {
+        id: recordId,
+        deviceId,
+        userId: session.id,
+        userName: session.name,
+        projectId: activeMilestone.projectId,
+        projectName: activeMilestone.title,
+        milestoneId: activeMilestone.id,
+        beneficiaryName: beneficiaryName.trim(),
+        interactionType,
+        notes: notes.trim(),
+        gpsLat: coords?.latitude ?? null,
+        gpsLng: coords?.longitude ?? null,
+        status: "pending",
+        createdAtDevice: createdAt,
+        submittedAtDevice: createdAt,
+        syncedAt: null,
+        lastError: null
+      };
 
+      await db.transaction("rw", [db.recordsLocal, db.mediaLocal, db.syncQueue, db.milestones, db.syncLog], async () => {
+        await db.recordsLocal.add(record);
         if (mediaEntries.length > 0) {
           await db.mediaLocal.bulkAdd(mediaEntries);
         }
-
         await db.syncQueue.put({
           id: recordId,
           recordId,
@@ -138,7 +121,7 @@ export function FieldConsole() {
           createdAt,
           updatedAt: createdAt
         });
-
+        await db.milestones.update(activeMilestone.id, { status: "submitted", updatedAt: createdAt });
         await db.syncLog.add({
           id: crypto.randomUUID(),
           recordId,
@@ -182,6 +165,29 @@ export function FieldConsole() {
       </main>
     );
   }
+
+  if (!activeMilestone) {
+    return (
+      <main className="shell field-layout">
+        <header className="site-header">
+           <Link className="brand" href="/">
+             <img className="brand-mark" src="/logo.svg" alt="Navadrishti logo" />
+             <span>Field console</span>
+           </Link>
+           <button className="button button-ghost" onClick={signOut} type="button">Sign out</button>
+        </header>
+        <section className="panel empty-state">
+           <h2>No Active Projects</h2>
+           <p>Your NGO hasn't been allotted a CSR project for the current pilot yet.</p>
+           <div className="auth-actions">
+              <button className="button button-primary" onClick={() => void syncNow()}>Check for allotments</button>
+           </div>
+        </section>
+      </main>
+    );
+  }
+
+  const isFormLocked = activeMilestone.status !== "pending";
 
   return (
     <main className="shell field-layout">
@@ -232,34 +238,30 @@ export function FieldConsole() {
             </div>
           </div>
 
-          <form className="form-grid" onSubmit={handleSubmit}>
-            <div className="two-up">
-              <div className="input-group">
-                <label htmlFor="projectId">Project ID</label>
-                <input className="input" id="projectId" onChange={(event) => setProjectId(event.target.value)} required value={projectId} />
-              </div>
-              <div className="input-group">
-                <label htmlFor="projectName">Project</label>
-                <input className="input" id="projectName" onChange={(event) => setProjectName(event.target.value)} required value={projectName} />
-              </div>
-            </div>
+          <div className="milestone-status-header">
+             <span className="eyebrow">Active Milestone ({activeMilestone.milestoneOrder})</span>
+             <h3>{activeMilestone.title}</h3>
+             <div className={`status-banner ${activeMilestone.status}`}>
+               {activeMilestone.status === "pending" && "✨ Open for Evidence Capture"}
+               {activeMilestone.status === "submitted" && "⏳ Evidence Submitted (Checking...)"}
+               {activeMilestone.status === "approved" && "🤝 Approved! Waiting for Pilot CA Payment."}
+               {activeMilestone.status === "payment_initiated" && "💰 Payment Initiated. Action Required!"}
+             </div>
+          </div>
 
-            <div className="two-up">
+          <form className="form-grid" onSubmit={handleSubmit}>
+            <fieldset disabled={isFormLocked} style={{ border: 'none', padding: 0 }}>
               <div className="input-group">
-                <label htmlFor="milestoneId">Milestone ID</label>
-                <input className="input" id="milestoneId" onChange={(event) => setMilestoneId(event.target.value)} value={milestoneId} />
-              </div>
-              <div className="input-group">
-                <label htmlFor="beneficiaryName">Beneficiary</label>
+                <label htmlFor="beneficiaryName">Beneficiary Name</label>
                 <input
                   className="input"
                   id="beneficiaryName"
                   onChange={(event) => setBeneficiaryName(event.target.value)}
+                  placeholder="Full name of beneficiary"
                   required
                   value={beneficiaryName}
                 />
               </div>
-            </div>
 
             <div className="input-group">
               <label htmlFor="interactionType">Beneficiary interaction</label>
@@ -289,22 +291,53 @@ export function FieldConsole() {
               />
               <p className="subtle">Selected {files.length} file(s) • {formatBytes(queuedBytes)}</p>
             </div>
+            </fieldset>
 
-            <div className="check-row">
-              <input checked={captureGps} id="captureGps" onChange={(event) => setCaptureGps(event.target.checked)} type="checkbox" />
-              <label htmlFor="captureGps">Capture GPS coordinates only when submitting this record</label>
-            </div>
+            {isFormLocked && activeMilestone.status !== "payment_initiated" ? (
+              <div className="locked-banner">
+                This milestone is currently <strong>{activeMilestone.status}</strong>. 
+                Please wait for the reviewer before adding more evidence.
+              </div>
+            ) : null}
+
+            {activeMilestone.status === "payment_initiated" ? (
+               <div className="payment-receipt-cta">
+                  <h3>Action Required: Upload Receipt</h3>
+                  <p>The Pilot CA has initiated payment. Please capture/upload your received receipt to unlock the next milestone.</p>
+                  <label htmlFor="receipt-upload" className="button button-primary">Capture Receipt</label>
+                  <input 
+                    type="file" 
+                    id="receipt-upload" 
+                    capture="environment" 
+                    accept="image/*" 
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (file && activeMilestone) {
+                         setSubmitting(true);
+                         const receiptId = crypto.randomUUID();
+                         await db.milestones.update(activeMilestone.id, { 
+                            status: "paid", 
+                            ngoReceiptId: receiptId,
+                            updatedAt: new Date().toISOString() 
+                         });
+                         setSubmitting(false);
+                         setSubmitState("Payment acknowledged! Next milestone unlocked.");
+                      }
+                    }}
+                    style={{ display: 'none' }}
+                  />
+               </div>
+            ) : null}
 
             {submitState ? <div className="info-banner">{submitState}</div> : null}
 
-            <div className="auth-actions">
-              <button className="button button-primary" disabled={submitting} type="submit">
-                {submitting ? "Saving..." : "Save local record"}
-              </button>
-              <button className="button button-secondary" onClick={() => void syncNow()} type="button">
-                Trigger sync
-              </button>
-            </div>
+            {!isFormLocked ? (
+              <div className="auth-actions">
+                <button className="button button-primary" disabled={submitting} type="submit">
+                  {submitting ? "Saving..." : "Save local record"}
+                </button>
+              </div>
+            ) : null}
           </form>
         </section>
 
