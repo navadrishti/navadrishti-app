@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import type { LocalMediaRecord, RemoteRecord, SyncQueueItem } from "@/lib/types";
 
 const SYNC_BATCH_SIZE = 5;
+const MAX_SYNC_ATTEMPTS = 10;
 
 export type SyncRunResult = {
   processed: number;
@@ -10,68 +11,105 @@ export type SyncRunResult = {
 };
 
 function calculateBackoffMs(attempts: number) {
-  return Math.min(30000 * 2 ** attempts, 30 * 60 * 1000);
+  const base = Math.min(30000 * 2 ** attempts, 30 * 60 * 1000);
+  const jitter = Math.random() * 5000; // Add up to 5s of jitter
+  return base + jitter;
 }
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-async function mirrorRecordToRemote(recordId: string, media: LocalMediaRecord[]) {
+async function syncRecordToApi(recordId: string, media: LocalMediaRecord[]) {
   const record = await db.recordsLocal.get(recordId);
 
   if (!record) {
     throw new Error("Local record missing.");
   }
 
-  const existing = await db.remoteRecords.where("sourceRecordId").equals(record.id).first();
-  if (existing) {
-    await db.recordsLocal.update(record.id, {
-      status: "synced",
-      syncedAt: existing.syncedAt,
-      lastError: null
-    });
-    return;
-  }
-
-  const syncedAt = new Date().toISOString();
-  const remoteRecord: RemoteRecord = {
-    id: `remote:${record.id}`,
-    sourceRecordId: record.id,
-    immutable: true,
-    receiptId: `rcpt-${record.id}`,
-    deviceId: record.deviceId,
-    userId: record.userId,
-    userName: record.userName,
-    projectId: record.projectId,
-    projectName: record.projectName,
-    milestoneId: record.milestoneId,
-    beneficiaryName: record.beneficiaryName,
-    interactionType: record.interactionType,
-    notes: record.notes,
-    gpsLat: record.gpsLat,
-    gpsLng: record.gpsLng,
-    submittedAtDevice: record.submittedAtDevice,
-    receivedAtServer: syncedAt,
-    syncedAt,
-    auditStatus: "ready",
-    media
+  // 1. Prepare Metadata Payload
+  const payload = {
+    event_id: crypto.randomUUID(),
+    event_type: "EVIDENCE_SUBMITTED",
+    entity_id: record.milestoneId || "unassigned",
+    data: {
+      recordId: record.id,
+      deviceId: record.deviceId,
+      userId: record.userId,
+      userName: record.userName,
+      projectId: record.projectId,
+      projectName: record.projectName,
+      milestoneId: record.milestoneId,
+      beneficiaryName: record.beneficiaryName,
+      interactionType: record.interactionType,
+      notes: record.notes,
+      gpsLat: record.gpsLat,
+      gpsLng: record.gpsLng,
+      submittedAtDevice: record.submittedAtDevice,
+      proofHashes: media.map(m => m.proofHash)
+    },
+    timestamp: new Date().toISOString(),
+    proof_hash: record.id // Simple correlation ID for the PWA
   };
 
-  await sleep(450);
-  await db.remoteRecords.put(remoteRecord);
-  await db.recordsLocal.update(record.id, { status: "synced", syncedAt, lastError: null });
+  // 2. Prepare Form Data (Multipart)
+  const formData = new FormData();
+  formData.append("payload", JSON.stringify(payload));
+  
+  for (const item of media) {
+    formData.append("files", item.blob, item.fileName);
+  }
+
+  // 3. Perform Sync
+  const response = await fetch("/api/sync/evidence", {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    if (response.status === 409) {
+       // Idempotency Success: Record is already on the server
+       const result = await response.json();
+       const syncedAt = new Date().toISOString();
+       await db.recordsLocal.update(record.id, { status: "synced", syncedAt, lastError: null });
+       return;
+    }
+
+    const errorBody = await response.json().catch(() => ({ error: "Sync failed" }));
+    
+    // Check for non-retryable errors
+    if (response.status === 400 || response.status === 403 || response.status === 404) {
+       throw new Error(`FATAL: ${errorBody.error}`);
+    }
+
+    if (response.status === 401) {
+       throw new Error(`AUTH_EXPIRED: Please sign in again.`);
+    }
+    
+    throw new Error(errorBody.error || `Server returned ${response.status}`);
+  }
+
+  const result = await response.json();
+  const syncedAt = new Date().toISOString();
+
+  // 4. Update Local State
+  await db.recordsLocal.update(record.id, { 
+    status: "synced", 
+    syncedAt, 
+    lastError: null 
+  });
 }
 
 async function failQueueItem(item: SyncQueueItem, message: string) {
   const updatedAt = new Date().toISOString();
   const attempts = item.attempts + 1;
+  const isFatal = message.startsWith("FATAL:") || message.startsWith("AUTH_EXPIRED:") || attempts >= MAX_SYNC_ATTEMPTS;
 
   await db.syncQueue.put({
     ...item,
     status: "failed",
     attempts,
-    nextAttemptAt: Date.now() + calculateBackoffMs(item.attempts),
+    nextAttemptAt: isFatal ? -1 : Date.now() + calculateBackoffMs(item.attempts), // -1 means terminal failure
     lastError: message,
     updatedAt
   });
@@ -85,7 +123,7 @@ async function failQueueItem(item: SyncQueueItem, message: string) {
     id: crypto.randomUUID(),
     recordId: item.recordId,
     level: "error",
-    message,
+    message: isFatal ? `[TERMINAL FAILURE] ${message}` : message,
     createdAt: updatedAt
   });
 }
@@ -122,7 +160,7 @@ export async function processSyncQueue(): Promise<SyncRunResult> {
       await db.recordsLocal.update(item.recordId, { status: "syncing", lastError: null });
 
       const media = await db.mediaLocal.where("recordId").equals(item.recordId).toArray();
-      await mirrorRecordToRemote(item.recordId, media);
+      await syncRecordToApi(item.recordId, media);
       await db.syncQueue.delete(item.id);
       await db.syncLog.add({
         id: crypto.randomUUID(),
@@ -134,7 +172,12 @@ export async function processSyncQueue(): Promise<SyncRunResult> {
       succeeded += 1;
     } catch (error) {
       failed += 1;
-      await failQueueItem(item, error instanceof Error ? error.message : "Unknown sync failure.");
+      const message = error instanceof Error ? error.message : "Unknown sync failure.";
+      await failQueueItem(item, message);
+
+      if (message.startsWith("AUTH_EXPIRED:")) {
+        break; // Stop batch processing if authentication is gone
+      }
     }
   }
 
