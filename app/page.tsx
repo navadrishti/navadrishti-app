@@ -1643,8 +1643,9 @@ export default function HomePage() {
         <div className="login-brand">
           <img className="login-brand-logo" src="/logo.svg" alt="Navadrishti logo" />
           <h1>Navadrishti</h1>
+          <p className="login-status">Field Operations & Evidence Vault</p>
         </div>
-        {sessionLoading ? <p className="login-status">Checking session...</p> : null}
+        {sessionLoading ? <div className="login-status" style={{ marginBottom: 20 }}>Checking session...</div> : null}
         {!configured ? (
           <div className="form-error" style={{ marginBottom: 12 }}>
             Server login is not configured yet. Create a <span className="mono">.env.local</span> using values from
