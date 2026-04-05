@@ -186,3 +186,39 @@ export type ProjectDraft = {
   documents: DraftDocumentEvidence[];
   updatedAt: string;
 };
+
+export type SystemEventType = 
+  | "EVIDENCE_SUBMITTED"
+  | "PAYMENT_ACKNOWLEDGED"
+  | "AUDIT_LOG"
+  | "SYSTEM_ALERT";
+
+export interface SystemEvent {
+  id: string; // The payload_hash (server-computed)
+  event_id: string; // Client-generated UUID for idempotency
+  event_type: SystemEventType;
+  entity_id: string; // e.g. projectId or milestoneId
+  payload: any;
+  payload_hash: string;
+  prev_hash: string | null; // For event chaining
+  user_id: string;
+  ngo_id: number;
+  device_id: string;
+  timestamp: string;
+}
+
+export interface IngestionPayload {
+  event_id: string;
+  event_type: SystemEventType;
+  entity_id: string;
+  data: any;
+  timestamp: string;
+  proof_hash: string; // The client-side SHA256 of the raw data
+}
+
+export interface SyncApiResponse {
+  ok: boolean;
+  error?: string;
+  eventId?: string;
+  payloadHash?: string;
+}
