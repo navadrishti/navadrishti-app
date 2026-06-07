@@ -4,21 +4,23 @@ import { useEffect, useState } from "react";
 
 type MediaPreviewProps = {
   blob: Blob;
+  remoteUrl?: string;
   mimeType: string;
   label: string;
 };
 
-export function MediaPreview({ blob, mimeType, label }: MediaPreviewProps) {
-  const [url, setUrl] = useState<string | null>(null);
+export function MediaPreview({ blob, remoteUrl, mimeType, label }: MediaPreviewProps) {
+  const [url, setUrl] = useState<string | null>(remoteUrl || null);
 
   useEffect(() => {
-    const objectUrl = URL.createObjectURL(blob);
-    setUrl(objectUrl);
-
-    return () => {
-      URL.revokeObjectURL(objectUrl);
-    };
-  }, [blob]);
+    if (blob.size > 0) {
+      const objectUrl = URL.createObjectURL(blob);
+      setUrl(objectUrl);
+      return () => URL.revokeObjectURL(objectUrl);
+    } else if (remoteUrl) {
+      setUrl(remoteUrl);
+    }
+  }, [blob, remoteUrl]);
 
   return (
     <div className="media-frame">

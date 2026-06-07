@@ -1,10 +1,14 @@
-export type SessionRole = "field" | "manager";
+export type SessionRole = "ngo" | "ca" | "field" | "manager" | "gov";
 
 export type AppSession = {
   id: string;
   name: string;
+  ngoId: number;
+  ngoName: string;
   email: string;
   role: SessionRole;
+  issuedAt: number;
+  expiresAt: number;
   createdAt: string;
 };
 
@@ -23,10 +27,16 @@ export type LocalRecord = {
   deviceId: string;
   userId: string;
   userName: string;
-  projectId: string;
+  projectId: string | null;      // NULL for GOV
   projectName: string;
   milestoneId: string | null;
-  beneficiaryName: string;
+  siteId?: string | null;        // NEW: Used by GOV
+  siteName?: string | null;      // NEW: For display
+  referencePointId?: string | null;
+  userType: "ngo" | "gov";
+  geoDistance?: number | null;
+  geoValidated?: boolean | null;
+  beneficiaryName: string | null; // Optional for GOV
   interactionType: "visit" | "distribution" | "training" | "verification";
   notes: string;
   gpsLat: number | null;
@@ -38,6 +48,40 @@ export type LocalRecord = {
   lastError: string | null;
 };
 
+export type ReferencePoint = {
+  id: string;
+  projectId: string | null;      // NULL for GOV
+  siteId?: string | null;        // NEW: Used by GOV
+  name: string;
+  latitude: number;
+  longitude: number;
+  radius?: number;
+  imageUrl?: string | null;
+  updatedAt: string;
+};
+
+export type AwcReferencePoint = {
+  id: string;
+  siteId: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  imageUrl?: string | null;
+};
+
+export type AwcSite = {
+  id: string;
+  name: string;
+  district: string;
+  block: string;
+  state: string;
+  address: string | null;
+  isActive: boolean;
+  referencePoints: AwcReferencePoint[];
+  updatedAt: string;
+};
+
 export type LocalMediaRecord = {
   id: string;
   recordId: string;
@@ -46,6 +90,7 @@ export type LocalMediaRecord = {
   size: number;
   kind: "image" | "video";
   blob: Blob;
+  remoteUrl?: string;
   proofHash: string | null; // SHA256 of the blob for immutability check
   createdAt: string;
 };
@@ -90,10 +135,10 @@ export type RemoteRecord = {
   deviceId: string;
   userId: string;
   userName: string;
-  projectId: string;
+  projectId: string | null;
   projectName: string;
   milestoneId: string | null;
-  beneficiaryName: string;
+  beneficiaryName: string | null;
   interactionType: LocalRecord["interactionType"];
   notes: string;
   gpsLat: number | null;
@@ -189,6 +234,9 @@ export type ProjectDraft = {
 
 export type SystemEventType = 
   | "EVIDENCE_SUBMITTED"
+  | "MILESTONE_APPROVED"
+  | "MILESTONE_REJECTED"
+  | "PAYMENT_COMPLETED"
   | "PAYMENT_ACKNOWLEDGED"
   | "AUDIT_LOG"
   | "SYSTEM_ALERT";
@@ -221,4 +269,5 @@ export interface SyncApiResponse {
   error?: string;
   eventId?: string;
   payloadHash?: string;
+  media?: any[];
 }
