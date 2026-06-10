@@ -1,11 +1,18 @@
 import crypto from "node:crypto";
 
+import { SessionRole } from "./types";
+
 export interface AppSession {
+  id: string;
+  name: string;
   ngoId: number;
   ngoName: string;
   email: string;
+  role: SessionRole;
   issuedAt: number;
   expiresAt: number;
+  deviceId: string;
+  createdAt: string;
 }
 
 export const SESSION_COOKIE_NAME = "navadrishti_session";

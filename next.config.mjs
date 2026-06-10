@@ -7,7 +7,7 @@ const workspaceRoot = path.dirname(fileURLToPath(import.meta.url));
 const withPWA = withPWAInit({
   dest: "public",
   register: true,
-  disable: process.env.NODE_ENV === "development",
+  disable: true, // Force disabled for development stability
   cacheOnFrontEndNav: true,
   fallbacks: {
     document: "/offline"

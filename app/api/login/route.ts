@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
   }
 
   const body = (await request.json().catch(() => null)) as
-    | { email?: string; password?: string }
+    | { email?: string; password?: string, device_id?: string }
     | null;
 
   const email = body?.email?.trim() ?? "";
@@ -55,7 +55,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const authResult = await authenticateNgoWithPassword(email, password);
+  const deviceId = body?.device_id ?? "";
+
+  const authResult = await authenticateNgoWithPassword(email, password, deviceId);
+
+  console.log(`[LOGIN_DEBUG] Email: ${email}, Allowed: ${authResult.allowed}, Reason: ${authResult.reason}`);
+  if (!authResult.allowed) console.dir(authResult.debug, { depth: null });
 
   if (!authResult.allowed || !authResult.ngoId || !authResult.ngoName || !authResult.email) {
     return NextResponse.json(
@@ -70,19 +75,29 @@ export async function POST(request: NextRequest) {
 
   const maxAge = getSessionCookieMaxAgeSeconds();
   const token = createSessionToken({
-    ngoId: authResult.ngoId,
-    ngoName: authResult.ngoName,
-    email: authResult.email,
+    id: authResult.ngoId?.toString() ?? "",
+    name: authResult.ngoName ?? "",
+    ngoId: authResult.ngoId ?? 0,
+    ngoName: authResult.ngoName ?? "",
+    email: authResult.email ?? "",
+    role: (authResult.role ?? "ngo") as any,
     issuedAt: Date.now(),
     expiresAt: Date.now() + maxAge * 1000,
+    deviceId: deviceId,
+    createdAt: new Date().toISOString(),
   });
 
   const response = NextResponse.json({
     ok: true,
     session: {
+      id: authResult.ngoId?.toString() ?? "",
+      name: authResult.ngoName ?? "",
       ngoId: authResult.ngoId,
       ngoName: authResult.ngoName,
       email: authResult.email,
+      role: authResult.role,
+      deviceId: deviceId,
+      createdAt: new Date().toISOString(),
     },
     debug: authResult.debug,
   });

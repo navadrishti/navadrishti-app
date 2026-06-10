@@ -1,6 +1,26 @@
 import { db } from "@/lib/db";
 import type { LocalMediaRecord, RemoteRecord, SyncQueueItem } from "@/lib/types";
 
+export function logStep(msg: string) {
+  if (typeof window !== "undefined") {
+    const w = window as any;
+    w.syncSteps = w.syncSteps || [];
+    w.syncSteps.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    if (w.onSyncStep) w.onSyncStep();
+  }
+  console.log(msg);
+}
+
+export function logStepError(msg: string) {
+  if (typeof window !== "undefined") {
+    const w = window as any;
+    w.syncSteps = w.syncSteps || [];
+    w.syncSteps.push(`[${new Date().toLocaleTimeString()}] ERROR: ${msg}`);
+    if (w.onSyncStep) w.onSyncStep();
+  }
+  console.error(msg);
+}
+
 const SYNC_BATCH_SIZE = 5;
 const MAX_SYNC_ATTEMPTS = 10;
 
@@ -27,32 +47,36 @@ async function syncRecordToApi(recordId: string, media: LocalMediaRecord[]) {
     throw new Error("Local record missing.");
   }
 
-  // 1. Prepare Metadata Payload
+  const createdAt = record.submittedAtDevice || new Date().toISOString();
+
+  // Explicitly map payload to avoid spreading and ensure domain separation
+  const payloadData = {
+    beneficiaryName: record.beneficiaryName,
+    interactionType: record.interactionType,
+    notes: record.notes,
+    projectId: record.projectId || null,
+    siteId: record.siteId || null,
+    referencePointId: record.referencePointId || null,
+    userType: record.userType,
+    geoDistance: record.geoDistance,
+    geoValidated: record.geoValidated,
+    gpsLat: record.gpsLat,
+    gpsLng: record.gpsLng,
+    deviceId: record.deviceId,
+    userName: record.userName,
+    milestoneId: record.milestoneId
+  };
+
+  // Prepare Form Data (Multipart)
   const payload = {
     event_id: crypto.randomUUID(),
     event_type: "EVIDENCE_SUBMITTED",
-    entity_id: record.milestoneId || "unassigned",
-    data: {
-      recordId: record.id,
-      deviceId: record.deviceId,
-      userId: record.userId,
-      userName: record.userName,
-      projectId: record.projectId,
-      projectName: record.projectName,
-      milestoneId: record.milestoneId,
-      beneficiaryName: record.beneficiaryName,
-      interactionType: record.interactionType,
-      notes: record.notes,
-      gpsLat: record.gpsLat,
-      gpsLng: record.gpsLng,
-      submittedAtDevice: record.submittedAtDevice,
-      proofHashes: media.map(m => m.proofHash)
-    },
-    timestamp: new Date().toISOString(),
-    proof_hash: record.id // Simple correlation ID for the PWA
+    entity_id: record.siteId || record.milestoneId || record.projectId || "unknown",
+    data: payloadData,
+    timestamp: createdAt,
+    proof_hash: record.id
   };
 
-  // 2. Prepare Form Data (Multipart)
   const formData = new FormData();
   formData.append("payload", JSON.stringify(payload));
   
@@ -61,7 +85,7 @@ async function syncRecordToApi(recordId: string, media: LocalMediaRecord[]) {
   }
 
   // 3. Perform Sync
-  const response = await fetch("/api/sync/evidence", {
+  const response = await fetch("/api/evidence", {
     method: "POST",
     body: formData,
   });
@@ -97,6 +121,34 @@ async function syncRecordToApi(recordId: string, media: LocalMediaRecord[]) {
     status: "synced", 
     syncedAt, 
     lastError: null 
+  });
+
+  // 5. Populate Remote Mirror for Manager/Review
+  await db.remoteRecords.put({
+    id: result.eventId,
+    sourceRecordId: record.id,
+    immutable: true,
+    receiptId: result.payloadHash,
+    deviceId: record.deviceId,
+    userId: record.userId,
+    userName: record.userName,
+    projectId: record.projectId,
+    projectName: record.projectName,
+    milestoneId: record.milestoneId,
+    beneficiaryName: record.beneficiaryName,
+    interactionType: record.interactionType,
+    notes: record.notes,
+    gpsLat: record.gpsLat,
+    gpsLng: record.gpsLng,
+    submittedAtDevice: record.submittedAtDevice,
+    receivedAtServer: syncedAt,
+    syncedAt: syncedAt,
+    auditStatus: "ready",
+    media: media.map((m, idx) => ({ 
+      ...m, 
+      blob: m.blob,
+      remoteUrl: result.media?.[idx]?.url // Assuming result returns the media array
+    }))
   });
 }
 
@@ -186,4 +238,200 @@ export async function processSyncQueue(): Promise<SyncRunResult> {
     succeeded,
     failed
   };
+}
+
+/**
+ * NGO-only: Fetches CSR projects and milestones.
+ */
+export async function pullProjectData(): Promise<void> {
+  if (!window.navigator.onLine) return;
+
+  try {
+    const res = await fetch("/api/projects");
+    if (!res.ok) throw new Error(`Fetch projects failed: ${res.status}`);
+    
+    const result = await res.json();
+    const projects = result.data;
+    if (!Array.isArray(projects)) return;
+
+    await db.transaction("rw", [db.milestones, db.referencePoints], async () => {
+      await db.milestones.clear();
+      const ngoKeys = await db.referencePoints.filter(rp => !!rp.projectId).primaryKeys();
+      await db.referencePoints.bulkDelete(ngoKeys);
+
+      for (const project of projects) {
+        // 1. Process Milestones
+        if (Array.isArray(project.csr_project_milestones)) {
+          const milestones = project.csr_project_milestones.map((ms: any) => ({
+            id: ms.id,
+            projectId: project.id,
+            title: ms.title,
+            description: ms.description || "",
+            milestoneOrder: ms.milestone_order,
+            amount: ms.amount,
+            status: ms.status || "pending",
+            evidenceRequirements: ms.evidence_requirements || [],
+            dueDate: ms.due_date || null,
+            updatedAt: new Date().toISOString()
+          }));
+          await db.milestones.bulkPut(milestones);
+        }
+
+        // 2. Process Reference Points
+        if (Array.isArray(project.reference_points)) {
+          const refPoints = project.reference_points.map((rp: any) => ({
+            id: rp.id,
+            projectId: project.id,
+            name: rp.name,
+            latitude: rp.latitude,
+            longitude: rp.longitude,
+            radius: 100 // Default 100m radius
+          }));
+          await db.referencePoints.bulkPut(refPoints);
+        }
+      }
+    });
+
+    console.log(`[SYNC_ENGINE] Successfully pulled ${projects.length} projects.`);
+    
+    // After pulling projects, also pull remote evidence for those projects
+    await pullRemoteRecords();
+  } catch (err) {
+    console.error("[SYNC_ENGINE] Pull failed:", err);
+    throw err;
+  }
+}
+
+/**
+ * GOV-only: Fetches AWC site data.
+ */
+export async function pullAwcData(): Promise<void> {
+  logStep("pullAwcData: Started");
+  if (!window.navigator.onLine) {
+    logStepError("pullAwcData: Device is offline according to navigator.onLine");
+    return;
+  }
+
+  try {
+    logStep("pullAwcData: Fetching /api/projects");
+    const res = await fetch("/api/projects");
+    logStep(`pullAwcData: Fetch responded with status ${res.status}`);
+    if (!res.ok) {
+      logStepError(`pullAwcData: Fetch returned error status: ${res.status}`);
+      return;
+    }
+
+    const result = await res.json();
+    logStep(`pullAwcData: JSON parsed, ok = ${result.ok}, role = ${result.role}`);
+    const sites = result.data;
+    if (!Array.isArray(sites)) {
+      logStepError("pullAwcData: Result data is not an array");
+      return;
+    }
+    logStep(`pullAwcData: Found ${sites.length} sites in response`);
+
+    logStep("pullAwcData: Starting db transaction");
+    await db.transaction("rw", [db.awcSites, db.referencePoints], async () => {
+      logStep("pullAwcData: Clearing awcSites");
+      await db.awcSites.clear();
+      
+      logStep("pullAwcData: Filtering reference points to delete");
+      const govKeys = await db.referencePoints
+        .filter(rp => !!rp.siteId)
+        .primaryKeys();
+      logStep(`pullAwcData: Deleting ${govKeys.length} GOV reference points`);
+      await db.referencePoints.bulkDelete(govKeys);
+
+      logStep("pullAwcData: Putting sites and reference points to DB");
+      for (const site of sites) {
+        await db.awcSites.put({
+          id: site.id,
+          name: site.name,
+          district: site.district,
+          block: site.block,
+          state: site.state,
+          address: site.address,
+          isActive: true,
+          referencePoints: [],
+          updatedAt: site.updated_at
+        });
+
+        if (Array.isArray(site.reference_points)) {
+          const refPoints = site.reference_points.map((rp: any) => ({
+            id: rp.id,
+            projectId: null,
+            siteId: rp.site_id,
+            name: rp.name,
+            latitude: rp.latitude,
+            longitude: rp.longitude,
+            radius: rp.radius_meters ?? 100,
+            imageUrl: rp.image_url ?? null,
+            updatedAt: new Date().toISOString()
+          }));
+          await db.referencePoints.bulkPut(refPoints);
+        }
+      }
+    });
+
+    logStep(`pullAwcData: Transaction completed. Successfully pulled ${sites.length} AWC sites.`);
+  } catch (err: any) {
+    logStepError(`pullAwcData: Failed with crash: ${err?.message || String(err)}`);
+  }
+}
+
+/**
+ * Fetches existing evidence events from the server to populate the manager dashboard.
+ */
+export async function pullRemoteRecords() {
+  if (!window.navigator.onLine) return;
+
+  try {
+    const res = await fetch("/api/sync/evidence/history");
+    if (!res.ok) return;
+
+    const { events } = await res.json();
+    if (!Array.isArray(events)) return;
+
+    await db.transaction("rw", [db.remoteRecords], async () => {
+      for (const event of events) {
+        const data = event.payload;
+        await db.remoteRecords.put({
+          id: event.id,
+          sourceRecordId: data.recordId || event.event_id,
+          immutable: true,
+          receiptId: event.payload_hash,
+          deviceId: event.device_id,
+          userId: event.user_id,
+          userName: data.userName || event.user_id,
+          projectId: data.projectId,
+          projectName: data.projectName || "Project",
+          milestoneId: data.milestoneId,
+          beneficiaryName: data.beneficiaryName || "Unknown",
+          interactionType: data.interactionType || "visit",
+          notes: data.notes || "",
+          gpsLat: data.gpsLat,
+          gpsLng: data.gpsLng,
+          submittedAtDevice: data.submittedAtDevice || event.timestamp,
+          receivedAtServer: event.timestamp,
+          syncedAt: new Date().toISOString(),
+          auditStatus: "ready",
+          media: (data.media || []).map((m: any) => ({
+             id: m.asset_id,
+             recordId: event.id,
+             fileName: "Remote Asset",
+             mimeType: "image/jpeg",
+             size: m.bytes || 0,
+             kind: "image",
+             blob: new Blob([]),
+             remoteUrl: m.url,
+             proofHash: m.proofHash || null,
+             createdAt: event.timestamp
+          }))
+        });
+      }
+    });
+    console.log(`[SYNC_ENGINE] Successfully synced ${events.length} remote evidence records.`);
+  } catch (err) {
+    console.error("[SYNC_ENGINE] Pull remote records failed:", err);
+  }
 }
