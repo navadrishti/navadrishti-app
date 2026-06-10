@@ -18,7 +18,7 @@ export function ManagerConsole() {
     return <main className="shell"><section className="panel">Loading manager workspace...</section></main>;
   }
 
-  if (!session || session.role !== "manager") {
+  if (!session || (session.role !== "manager" && session.role !== "ca")) {
     return (
       <main className="shell">
         <section className="panel">
@@ -156,7 +156,13 @@ export function ManagerConsole() {
                 {record.media.length > 0 ? (
                   <div className="media-grid">
                     {record.media.map((media) => (
-                      <MediaPreview blob={media.blob} key={media.id} label={media.fileName} mimeType={media.mimeType} />
+                      <MediaPreview 
+                        key={media.id} 
+                        blob={media.blob} 
+                        remoteUrl={media.remoteUrl}
+                        label={media.fileName} 
+                        mimeType={media.mimeType} 
+                      />
                     ))}
                   </div>
                 ) : null}
