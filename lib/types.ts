@@ -15,6 +15,7 @@ export type AppSession = {
 
 export type LocalRecordStatus = "pending" | "syncing" | "synced" | "failed";
 export type QueueStatus = "pending" | "syncing" | "failed";
+export type SyncQueueKind = "evidence" | "attendance";
 
 export type MilestoneStatus =
   | "pending"
@@ -85,6 +86,9 @@ export type LocalMilestone = {
 export type SyncQueueItem = {
   id: string;
   recordId: string;
+  /** Owner of this queued upload — sync only runs for the active session user. */
+  userId: string;
+  kind: SyncQueueKind;
   status: QueueStatus;
   attempts: number;
   nextAttemptAt: number;
@@ -99,6 +103,35 @@ export type SyncLogEntry = {
   level: "info" | "error";
   message: string;
   createdAt: string;
+};
+
+/** Cached attendance roster for offline browsing (per signed-in user). */
+export type AttendanceAssignmentCache = {
+  userId: string;
+  updatedAt: string;
+  activeCampaigns: any[];
+  historyCampaigns: any[];
+  activeSkills: any[];
+  historySkills: any[];
+};
+
+/** Offline attendance mark waiting to upload under the same user session. */
+export type AttendanceOutboxItem = {
+  id: string;
+  userId: string;
+  assignmentId: string;
+  attendanceDate: string;
+  mode: "selfie" | "photo";
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  units: number | null;
+  photoProofs: Array<{ proofHash: string; capturedAt: string }>;
+  title: string;
+  status: LocalRecordStatus;
+  createdAt: string;
+  syncedAt: string | null;
+  lastError: string | null;
 };
 
 export type LocalRecordWithMedia = LocalRecord & {
