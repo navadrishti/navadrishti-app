@@ -31,10 +31,6 @@
   --status-bar-height: 0px;
 }
 
-html.capacitor-native {
-  --safe-top: max(env(safe-area-inset-top, 0px), var(--status-bar-height, 0px));
-}
-
 * {
   box-sizing: border-box;
   margin: 0;
