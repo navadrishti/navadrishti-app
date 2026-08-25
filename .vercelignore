@@ -1,0 +1,11 @@
+android/
+assets/
+.next/
+node_modules/
+coverage/
+dist/
+*.log
+tsconfig.tsbuildinfo
+.env
+.env.local
+.env*.local
