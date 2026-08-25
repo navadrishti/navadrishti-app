@@ -1,11 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+import { getSupabasePublishableKey, getSupabaseUrl, hasBrowserSupabaseEnv } from "@/lib/env";
 
 let cachedClient: ReturnType<typeof createClient> | null = null;
 
 export function getSupabaseClient() {
+  const supabaseUrl = getSupabaseUrl();
+  const supabaseAnonKey = getSupabasePublishableKey();
+
   if (!supabaseUrl || !supabaseAnonKey) {
     return null;
   }
@@ -15,8 +16,8 @@ export function getSupabaseClient() {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true
-      }
+        detectSessionInUrl: true,
+      },
     });
   }
 
@@ -24,5 +25,7 @@ export function getSupabaseClient() {
 }
 
 export function hasSupabaseEnv() {
-  return Boolean(supabaseUrl && supabaseAnonKey);
+  return hasBrowserSupabaseEnv();
 }
+
+export { hasBrowserSupabaseEnv };
