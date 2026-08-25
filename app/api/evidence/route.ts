@@ -27,6 +27,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (session.role !== "ngo") {
+    return NextResponse.json<SyncApiResponse>(
+      { ok: false, error: "Evidence capture is available for NGO accounts." },
+      { status: 403 }
+    );
+  }
+
   if (!hasCloudinaryEnv()) {
     return NextResponse.json<SyncApiResponse>(
       { ok: false, error: "Cloudinary configuration missing." },
@@ -69,10 +76,7 @@ export async function POST(request: NextRequest) {
     const files = formData.getAll("files") as File[];
     const cloudinaryAssets = [];
 
-    const isGov = session.role === "gov";
-    const folderPath = isGov 
-      ? `navadrishti/gov/site-${entity_id}`
-      : `navadrishti/ngo-${session.ngoId}/milestone-${entity_id}`;
+    const folderPath = `navadrishti/ngo-${session.ngoId}/milestone-${entity_id}`;
 
     for (const file of files) {
       const buffer = Buffer.from(await file.arrayBuffer());

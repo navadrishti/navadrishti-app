@@ -5,6 +5,7 @@ import {
   getSessionCookieMaxAgeSeconds,
   SESSION_COOKIE_NAME,
 } from "@/lib/session";
+import { getSessionSecret, hasServerEnv } from "@/lib/env";
 import { hasServerSupabaseEnv } from "@/lib/supabase-server";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
@@ -30,12 +31,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!hasServerSupabaseEnv() || !process.env.APP_SESSION_SECRET) {
+  if (!hasServerSupabaseEnv() || !getSessionSecret()) {
     return NextResponse.json(
       {
         ok: false,
         error:
-          "Server login is not configured. Add SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and APP_SESSION_SECRET.",
+          "Server login is not configured. Add NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SECRET_KEY, and SESSION_SECRET.",
       },
       { status: 500 },
     );
