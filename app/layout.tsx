@@ -10,10 +10,24 @@ const inter = Inter({
   display: "swap",
 });
 
+const siteTitle = `${PRODUCT_NAME} | Digital OS for Social Impact`;
+
 export const metadata: Metadata = {
-  title: FIELD_APP_NAME,
-  description: `${PRODUCT_NAME} App — powered by Navadrishti`,
+  title: {
+    absolute: siteTitle,
+    default: siteTitle,
+  },
+  applicationName: FIELD_APP_NAME,
+  description: `${PRODUCT_NAME} App — field attendance and evidence capture, powered by Navadrishti`,
   manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [
+      { url: "/Gram.png", type: "image/png", sizes: "512x512" },
+      { url: "/Gram.svg", type: "image/svg+xml" },
+    ],
+    apple: [{ url: "/Gram.png", type: "image/png", sizes: "512x512" }],
+    shortcut: ["/Gram.png"],
+  },
 };
 
 export const viewport: Viewport = {

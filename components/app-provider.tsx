@@ -357,7 +357,11 @@ function InstallGate({ children }: { children: React.ReactNode }) {
   return (
     <main className="login-screen">
       <div className="login-shell">
-        <ProductBrand size="md" showFieldSuffix nameClassName="brand-name-on-light" poweredClassName="brand-powered-on-light" />
+        <ProductBrand
+          size="md"
+          nameClassName="brand-name-on-field"
+          poweredClassName="brand-powered-on-field"
+        />
         <section className="login-card">
           <h1 style={{ margin: "0 0 8px", fontSize: "1.25rem" }}>Install {FIELD_APP_NAME}</h1>
           <p className="subtle" style={{ marginBottom: 16 }}>
