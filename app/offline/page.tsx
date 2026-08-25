@@ -8,7 +8,7 @@ export default function OfflinePage() {
     <main className="login-screen">
       <section className="login-card">
         <div className="login-brand">
-          <ProductBrand size="sm" showFieldSuffix nameClassName="brand-name-on-light" poweredClassName="brand-powered-on-light" />
+          <ProductBrand size="sm" nameClassName="brand-name-on-light" poweredClassName="brand-powered-on-light" />
           <h1>You&apos;re Offline</h1>
           <p className="login-status">
             You can still capture evidence. It will sync when you&apos;re back online.
