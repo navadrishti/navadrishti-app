@@ -3,12 +3,9 @@ import type {
   LocalMediaRecord,
   LocalMilestone,
   LocalRecord,
-  ProjectDraft,
   ReferencePoint,
-  RemoteRecord,
   SyncLogEntry,
   SyncQueueItem,
-  AwcSite,
 } from "@/lib/types";
 
 class NavadrishtiDB extends Dexie {
@@ -16,22 +13,18 @@ class NavadrishtiDB extends Dexie {
   mediaLocal!: Table<LocalMediaRecord, string>;
   syncQueue!: Table<SyncQueueItem, string>;
   syncLog!: Table<SyncLogEntry, string>;
-  remoteRecords!: Table<RemoteRecord, string>;
-  projectDrafts!: Table<ProjectDraft, string>;
   milestones!: Table<LocalMilestone, string>;
   referencePoints!: Table<ReferencePoint, string>;
-  awcSites!: Table<AwcSite, string>;
 
   constructor() {
     super("navadrishti-field-db");
 
-    // Versions 1-7 ...
     this.version(1).stores({
       recordsLocal: "id, status, userId, submittedAtDevice",
       mediaLocal: "id, recordId, kind, createdAt",
       syncQueue: "id, recordId, status, nextAttemptAt, attempts",
       syncLog: "id, recordId, createdAt",
-      remoteRecords: "id, sourceRecordId, syncedAt, submittedAtDevice"
+      remoteRecords: "id, sourceRecordId, syncedAt, submittedAtDevice",
     });
 
     this.version(2).stores({
@@ -39,7 +32,7 @@ class NavadrishtiDB extends Dexie {
       mediaLocal: "id, recordId, kind, createdAt",
       syncQueue: "id, recordId, status, nextAttemptAt, attempts",
       syncLog: "id, recordId, createdAt",
-      remoteRecords: "id, &sourceRecordId, projectId, syncedAt, submittedAtDevice, receivedAtServer"
+      remoteRecords: "id, &sourceRecordId, projectId, syncedAt, submittedAtDevice, receivedAtServer",
     });
 
     this.version(3).stores({
@@ -48,22 +41,24 @@ class NavadrishtiDB extends Dexie {
       syncQueue: "id, recordId, status, nextAttemptAt, attempts",
       syncLog: "id, recordId, createdAt",
       remoteRecords: "id, &sourceRecordId, projectId, syncedAt, submittedAtDevice, receivedAtServer",
-      projectDrafts: "id, ngoId, projectId, updatedAt"
+      projectDrafts: "id, ngoId, projectId, updatedAt",
     });
 
     this.version(7).stores({
-      recordsLocal: "id, deviceId, status, userId, projectId, referencePointId, userType, geoValidated, submittedAtDevice",
+      recordsLocal:
+        "id, deviceId, status, userId, projectId, referencePointId, userType, geoValidated, submittedAtDevice",
       mediaLocal: "id, recordId, kind, createdAt",
       syncQueue: "id, recordId, status, nextAttemptAt, attempts",
       syncLog: "id, recordId, createdAt",
       remoteRecords: "id, &sourceRecordId, projectId, syncedAt, submittedAtDevice, receivedAtServer",
       projectDrafts: "id, ngoId, projectId, updatedAt",
       milestones: "id, projectId, milestoneOrder, status",
-      referencePoints: "id, projectId, name"
+      referencePoints: "id, projectId, name",
     });
 
     this.version(8).stores({
-      recordsLocal: "id, deviceId, status, userId, projectId, siteId, referencePointId, userType, geoValidated, submittedAtDevice",
+      recordsLocal:
+        "id, deviceId, status, userId, projectId, siteId, referencePointId, userType, geoValidated, submittedAtDevice",
       mediaLocal: "id, recordId, kind, createdAt",
       syncQueue: "id, recordId, status, nextAttemptAt, attempts",
       syncLog: "id, recordId, createdAt",
@@ -71,17 +66,12 @@ class NavadrishtiDB extends Dexie {
       projectDrafts: "id, ngoId, projectId, updatedAt",
       milestones: "id, projectId, milestoneOrder, status",
       referencePoints: "id, projectId, siteId, name",
-      awcSites: "id, district, block, updatedAt"
-    }).upgrade(tx => {
-      // Migration: Backfill legacy records as NGO domain
-      return tx.table("recordsLocal").toCollection().modify(record => {
-        if (!record.userType) record.userType = "ngo";
-        if (record.siteId === undefined) record.siteId = null;
-      });
+      awcSites: "id, district, block, updatedAt",
     });
 
     this.version(9).stores({
-      recordsLocal: "id, deviceId, status, userId, projectId, siteId, referencePointId, userType, geoValidated, submittedAtDevice",
+      recordsLocal:
+        "id, deviceId, status, userId, projectId, siteId, referencePointId, userType, geoValidated, submittedAtDevice",
       mediaLocal: "id, recordId, kind, createdAt",
       syncQueue: "id, recordId, status, nextAttemptAt, attempts",
       syncLog: "id, recordId, createdAt",
@@ -89,7 +79,20 @@ class NavadrishtiDB extends Dexie {
       projectDrafts: "id, ngoId, projectId, updatedAt",
       milestones: "id, projectId, milestoneOrder, status",
       referencePoints: "id, projectId, siteId, name",
-      awcSites: "id, district, block, updatedAt"
+      awcSites: "id, district, block, updatedAt",
+    });
+
+    // Current GRAM App schema: NGO evidence + attendance only (drop CA/gov leftovers)
+    this.version(10).stores({
+      recordsLocal: "id, deviceId, status, userId, projectId, milestoneId, submittedAtDevice",
+      mediaLocal: "id, recordId, kind, createdAt",
+      syncQueue: "id, recordId, status, nextAttemptAt, attempts",
+      syncLog: "id, recordId, createdAt",
+      milestones: "id, projectId, milestoneOrder, status",
+      referencePoints: "id, projectId, name",
+      remoteRecords: null,
+      projectDrafts: null,
+      awcSites: null,
     });
 
     this.on("blocked", () => {

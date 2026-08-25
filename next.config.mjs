@@ -7,7 +7,8 @@ const workspaceRoot = path.dirname(fileURLToPath(import.meta.url));
 const withPWA = withPWAInit({
   dest: "public",
   register: true,
-  disable: true, // Force disabled for development stability
+  // Keep SW off in `next dev`; enable it for production / Vercel builds.
+  disable: process.env.NODE_ENV === "development",
   cacheOnFrontEndNav: true,
   fallbacks: {
     document: "/offline"
@@ -18,7 +19,8 @@ const withPWA = withPWAInit({
 const nextConfig = {
   reactStrictMode: true,
   typedRoutes: false,
-  outputFileTracingRoot: workspaceRoot
+  outputFileTracingRoot: workspaceRoot,
+  devIndicators: false,
 };
 
 export default withPWA(nextConfig);

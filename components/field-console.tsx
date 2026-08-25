@@ -3,35 +3,37 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { useAppContext } from "@/components/app-provider";
+import { AppFooter, ProductBrand } from "@/components/product-brand";
+import { CardSectionSkeleton, Skeleton } from "@/components/skeleton";
 import { calculateHash } from "@/lib/crypto";
 import { db } from "@/lib/db";
-import { getDeviceId } from "@/lib/device";
-import { getCurrentPosition } from "../lib/utils";
-import type { LocalMediaRecord, LocalRecord, LocalRecordWithMedia, ReferencePoint, AwcSite, LocalMilestone } from "@/lib/types";
+import { apiFetch } from "@/lib/env";
+import { getDeviceId, getCurrentPosition, getLocalDateStringClient } from "@/lib/utils";
+import { randomUUID } from "@/lib/crypto";
+import type { LocalMediaRecord, LocalRecord } from "@/lib/types";
 
 if (typeof window !== "undefined") {
-  (window as any).db = db;
-}
-
-/**
- * Haversine formula — returns distance in metres between two GPS coordinates.
- */
-function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const R = 6371000;
-  const toRad = (deg: number) => deg * (Math.PI / 180);
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  // Dev-only: expose db in console via window.__navadrishti_db if needed
+  if (process.env.NODE_ENV === "development") {
+    (window as unknown as { __navadrishti_db?: typeof db }).__navadrishti_db = db;
+  }
 }
 
 export function FieldConsole() {
   const { session, sessionLoading, isOnline, isSyncing, signOut, syncNow } = useAppContext();
+  const [activeTab, setActiveTab] = useState<"evidence" | "attendance">("evidence");
   const [capturedBlobs, setCapturedBlobs] = useState<{ blob: Blob; url: string; name: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitState, setSubmitState] = useState<string | null>(null);
   const [deviceId] = useState(() => getDeviceId());
   const [activePreviewUrl, setActivePreviewUrl] = useState<string | null>(null);
+
+  const canEvidence = session?.role === "ngo";
+  const canAttendance = session?.role === "ngo" || session?.role === "individual";
+
+  useEffect(() => {
+    if (session?.role === "individual") setActiveTab("attendance");
+  }, [session?.role]);
 
   // Camera State
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -39,8 +41,6 @@ export function FieldConsole() {
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraLoading, setCameraLoading] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
-
-  const isGovUser = session?.role === "gov";
 
   // Shared Queries (Isolated by Logged-in User)
   const records = useLiveQuery(async () => {
@@ -116,65 +116,75 @@ export function FieldConsole() {
     projectId: string | null;
     projectName: string;
     milestoneId: string | null;
-    siteId: string | null;
-    siteName: string | null;
     referencePointId: string | null;
-    refPoint?: ReferencePoint;
   }) {
     if (!session) return;
     setSubmitting(true);
     setSubmitState(null);
 
     try {
-      // 1. FRESH GPS POLL
       const coords = await getCurrentPosition();
       if (!coords) throw new Error("Could not acquire GPS signal. Check permissions.");
 
-      // 2. GEO VALIDATION (FOR GOV)
-      let geoDistance: number | null = null;
-      let geoValidated = true;
-
-      if (isGovUser && data.refPoint) {
-        geoDistance = haversineDistance(coords.latitude, coords.longitude, data.refPoint.latitude, data.refPoint.longitude);
-        geoValidated = geoDistance <= (data.refPoint.radius ?? 100);
-        
-        if (!geoValidated) {
-          throw new Error(`Location Verification Failed: You are ${(geoDistance - (data.refPoint.radius ?? 100)).toFixed(0)}m outside the required radius.`);
-        }
-      }
-
-      const recordId = crypto.randomUUID();
+      const recordId = randomUUID();
       const createdAt = new Date().toISOString();
 
-      // 3. MEDIA PREP
       const mediaEntries: LocalMediaRecord[] = await Promise.all(
         capturedBlobs.map(async (item) => ({
-          id: crypto.randomUUID(), recordId, fileName: item.name, mimeType: item.blob.type, size: item.blob.size, kind: "image" as const, blob: item.blob, proofHash: await calculateHash(item.blob), createdAt
+          id: randomUUID(),
+          recordId,
+          fileName: item.name,
+          mimeType: item.blob.type,
+          size: item.blob.size,
+          kind: "image" as const,
+          blob: item.blob,
+          proofHash: await calculateHash(item.blob),
+          createdAt,
         }))
       );
 
-      // 4. RECORD ASSEMBLY
       const record: LocalRecord = {
-        id: recordId, deviceId, userId: session.id, userName: session.name,
-        projectId: data.projectId, projectName: data.projectName, milestoneId: data.milestoneId,
-        siteId: data.siteId, siteName: data.siteName, referencePointId: data.referencePointId,
-        userType: isGovUser ? "gov" : "ngo",
-        geoDistance, geoValidated,
+        id: recordId,
+        deviceId,
+        userId: session.id,
+        userName: session.name,
+        projectId: data.projectId,
+        projectName: data.projectName,
+        milestoneId: data.milestoneId,
+        referencePointId: data.referencePointId,
+        userType: "ngo",
         beneficiaryName: data.beneficiaryName,
-        interactionType: data.interactionType as any,
+        interactionType: data.interactionType as LocalRecord["interactionType"],
         notes: data.notes,
-        gpsLat: coords.latitude, gpsLng: coords.longitude,
-        status: "pending", createdAtDevice: createdAt, submittedAtDevice: createdAt, syncedAt: null, lastError: null
+        gpsLat: coords.latitude,
+        gpsLng: coords.longitude,
+        status: "pending",
+        createdAtDevice: createdAt,
+        submittedAtDevice: createdAt,
+        syncedAt: null,
+        lastError: null,
       };
 
       await db.transaction("rw", [db.recordsLocal, db.mediaLocal, db.syncQueue, db.milestones], async () => {
         await db.recordsLocal.add(record);
         await db.mediaLocal.bulkAdd(mediaEntries);
-        await db.syncQueue.put({ id: recordId, recordId, status: "pending", attempts: 0, nextAttemptAt: Date.now(), lastError: null, createdAt, updatedAt: createdAt });
-        if (data.milestoneId) await db.milestones.update(data.milestoneId, { status: "submitted", updatedAt: createdAt });
+        await db.syncQueue.put({
+          id: recordId,
+          recordId,
+          status: "pending",
+          attempts: 0,
+          nextAttemptAt: Date.now(),
+          lastError: null,
+          createdAt,
+          updatedAt: createdAt,
+        });
+        if (data.milestoneId) {
+          await db.milestones.update(data.milestoneId, { status: "submitted", updatedAt: createdAt });
+        }
       });
 
-      setCapturedBlobs([]); setSubmitState("Evidence sealed and queued for sync.");
+      setCapturedBlobs([]);
+      setSubmitState("Evidence saved. Will sync when online.");
       if (isOnline) await syncNow();
     } catch (error) {
       setSubmitState(error instanceof Error ? error.message : "Submission failed.");
@@ -183,126 +193,170 @@ export function FieldConsole() {
     }
   }
 
-  if (sessionLoading) return <main className="app"><section className="card-section">Initialising Terminal...</section></main>;
+  if (sessionLoading) return null;
+
+  const statsLoading = stats === undefined;
+  const recordsLoading = records === undefined;
+  const showHubTabs = canEvidence && canAttendance;
+  const showAttendance = canAttendance && (activeTab === "attendance" || !canEvidence);
 
   return (
-    <main className="app">
-      <header className="app-header">
-        <div className="header-left">
-          <img className="header-logo" src="/logo.svg" alt="ND" />
+    <main className="app field-hub">
+      <header className="app-header field-hub-header">
+        <div className="header-left field-hub-brand">
+          <ProductBrand size="sm" className="header-brand" />
           <div>
-            <h1 className="header-org">{session?.ngoName || "Field Operator"}</h1>
-            <p className="header-meta">{session?.role?.toUpperCase()} • {isOnline ? "Connected" : "Offline"}</p>
+            <h1 className="header-org field-hub-user">{session?.ngoName || session?.name || "User"}</h1>
+            <p className="header-meta">
+              {isOnline ? (isSyncing ? "Syncing…" : "Online") : "Offline"}
+            </p>
           </div>
         </div>
-        <button className="btn-outline" onClick={signOut}>Exit</button>
+        <div className="field-hub-actions">
+          {!showAttendance ? (
+            <button type="button" className="btn-outline" onClick={() => void syncNow()} disabled={!isOnline || isSyncing}>
+              Sync
+            </button>
+          ) : null}
+          <button type="button" className="btn-outline" onClick={signOut}>Sign Out</button>
+        </div>
       </header>
 
-      {/* Dashboard Metrics */}
-      <section className="card-section">
-        <div className="chips-row">
-          <div className="chip">
-             <div className={`chip-dot ${isSyncing ? 'dot-syncing' : (isOnline ? 'dot-online' : 'dot-offline')}`} />
-             {isSyncing ? "Syncing..." : (isOnline ? "Server Live" : "Local Only")}
-          </div>
-          <div className="chip"><span className="badge badge-slate">Queue</span> {stats.pending}</div>
-          <div className="chip"><span className="badge badge-blue">Media</span> {stats.mediaCount}</div>
-        </div>
-      </section>
+      {showHubTabs ? (
+        <nav className="field-hub-tabs" aria-label="App sections">
+          <button
+            type="button"
+            className={activeTab === "evidence" ? "is-active" : ""}
+            onClick={() => setActiveTab("evidence")}
+          >
+            Evidence
+          </button>
+          <button
+            type="button"
+            className={activeTab === "attendance" ? "is-active" : ""}
+            onClick={() => setActiveTab("attendance")}
+          >
+            Attendance
+          </button>
+        </nav>
+      ) : null}
 
-      {isGovUser ? (
-        <GovCaptureView 
-          onSeal={handleSeal} 
-          submitting={submitting} 
-          submitState={submitState}
-          capturedBlobs={capturedBlobs}
-          setCapturedBlobs={setCapturedBlobs}
-          cameraReady={cameraReady}
-          cameraLoading={cameraLoading}
-          startCamera={startCamera}
-          stopCamera={stopCamera}
-          capturePhoto={capturePhoto}
-          videoRef={videoRef}
-          canvasRef={canvasRef}
-          onPreviewImage={setActivePreviewUrl}
-        />
+      {showAttendance ? (
+        <AttendancePanel showSkillSection={session?.role === "ngo"} />
       ) : (
-        <NgoCaptureView 
-          onSeal={handleSeal} 
-          submitting={submitting} 
-          submitState={submitState}
-          capturedBlobs={capturedBlobs}
-          setCapturedBlobs={setCapturedBlobs}
-          cameraReady={cameraReady}
-          cameraLoading={cameraLoading}
-          startCamera={startCamera}
-          stopCamera={stopCamera}
-          capturePhoto={capturePhoto}
-          videoRef={videoRef}
-          canvasRef={canvasRef}
-          onPreviewImage={setActivePreviewUrl}
-        />
+        <>
+          <section className="card-section">
+            <div className="chips-row">
+              {statsLoading ? (
+                <>
+                  <Skeleton className="skeleton-chip" />
+                  <Skeleton className="skeleton-chip" />
+                  <Skeleton className="skeleton-chip" />
+                </>
+              ) : (
+                <>
+                  <div className="chip">
+                    <div className={`chip-dot ${isSyncing ? "dot-syncing" : isOnline ? "dot-online" : "dot-offline"}`} />
+                    {isSyncing ? "Syncing…" : isOnline ? "Server Live" : "Local Only"}
+                  </div>
+                  <div className="chip">
+                    <span className="badge badge-slate">Queue</span> {stats.pending}
+                  </div>
+                  <div className="chip">
+                    <span className="badge badge-blue">Media</span> {stats.mediaCount}
+                  </div>
+                </>
+              )}
+            </div>
+          </section>
+
+          <NgoCaptureView
+            onSeal={handleSeal}
+            submitting={submitting}
+            submitState={submitState}
+            capturedBlobs={capturedBlobs}
+            setCapturedBlobs={setCapturedBlobs}
+            cameraReady={cameraReady}
+            cameraLoading={cameraLoading}
+            startCamera={startCamera}
+            stopCamera={stopCamera}
+            capturePhoto={capturePhoto}
+            videoRef={videoRef}
+            canvasRef={canvasRef}
+            onPreviewImage={setActivePreviewUrl}
+          />
+
+          <section className="card-section">
+            <span className="section-title">Recent Device History</span>
+            <div style={{ display: "grid", gap: "8px" }}>
+              {recordsLoading ? (
+                <>
+                  <Skeleton className="skeleton-ledger" />
+                  <Skeleton className="skeleton-ledger" />
+                  <Skeleton className="skeleton-ledger" />
+                </>
+              ) : records.length === 0 ? (
+                <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                  No local records found.
+                </p>
+              ) : (
+                records.slice(0, 5).map((r) => (
+                  <div key={r.id} className="ledger-item" style={{ flexDirection: "column", alignItems: "stretch" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                      <div className="ledger-info">
+                        <div className="ledger-title">{r.beneficiaryName || "Evidence Record"}</div>
+                        <div className="ledger-meta">{r.projectName} • {new Date(r.submittedAtDevice).toLocaleTimeString()}</div>
+                      </div>
+                      <div className={`status-badge status-${r.status}`}>{r.status}</div>
+                    </div>
+                    <LedgerItemMedia media={r.media} onPreview={setActivePreviewUrl} />
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        </>
       )}
 
-      {/* Shared Ledger */}
-      <section className="card-section">
-        <span className="section-title">Recent Device History</span>
-        <div style={{ display: 'grid', gap: '8px' }}>
-          {records.length === 0 && <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.8rem' }}>No local records found.</p>}
-          {records.slice(0, 5).map(r => (
-            <div key={r.id} className="ledger-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-                <div className="ledger-info">
-                  <div className="ledger-title">{r.siteName || r.beneficiaryName || "Evidence Record"}</div>
-                  <div className="ledger-meta">{r.projectName} • {new Date(r.submittedAtDevice).toLocaleTimeString()}</div>
-                </div>
-                <div className={`status-badge status-${r.status}`}>{r.status}</div>
-              </div>
-              <LedgerItemMedia media={r.media} onPreview={setActivePreviewUrl} />
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Full-Size Lightbox Preview Modal */}
       {activePreviewUrl && (
-        <div 
+        <div
           style={{
-            position: 'fixed',
+            position: "fixed",
             inset: 0,
-            background: 'rgba(0,0,0,0.85)',
+            background: "rgba(0,0,0,0.85)",
             zIndex: 1000,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '20px',
-            backdropFilter: 'blur(8px)',
-            cursor: 'zoom-out'
-          }} 
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "20px",
+            backdropFilter: "blur(8px)",
+            cursor: "zoom-out",
+          }}
           onClick={() => setActivePreviewUrl(null)}
         >
-          <div style={{ position: 'relative', maxWidth: '90%', maxHeight: '90%' }} onClick={e => e.stopPropagation()}>
-            <img 
-              src={activePreviewUrl} 
-              style={{ maxWidth: '100%', maxHeight: '80vh', objectFit: 'contain', borderRadius: 'var(--radius-md)', border: '2px solid rgba(255,255,255,0.2)' }} 
-              alt="Full Preview" 
+          <div style={{ position: "relative", maxWidth: "90%", maxHeight: "90%" }} onClick={(e) => e.stopPropagation()}>
+            <img
+              src={activePreviewUrl}
+              style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain", borderRadius: "var(--radius-md)", border: "2px solid rgba(255,255,255,0.2)" }}
+              alt="Full Preview"
             />
-            <button 
-              onClick={() => setActivePreviewUrl(null)} 
+            <button
+              type="button"
+              onClick={() => setActivePreviewUrl(null)}
               style={{
-                position: 'absolute',
-                top: '-45px',
-                right: '0',
-                background: '#fff',
-                color: '#000',
-                fontWeight: 'bold',
-                fontSize: '0.8rem',
-                padding: '6px 14px',
-                borderRadius: '8px',
-                border: 'none',
-                cursor: 'pointer',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.3)'
+                position: "absolute",
+                top: "-45px",
+                right: "0",
+                background: "#fff",
+                color: "#000",
+                fontWeight: "bold",
+                fontSize: "0.8rem",
+                padding: "6px 14px",
+                borderRadius: "8px",
+                border: "none",
+                cursor: "pointer",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
               }}
             >
               Close
@@ -310,11 +364,549 @@ export function FieldConsole() {
           </div>
         </div>
       )}
+      <AppFooter />
     </main>
   );
 }
 
+function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boolean }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [bucket, setBucket] = useState<"active" | "history">("active");
+  const [activeCampaigns, setActiveCampaigns] = useState<any[]>([]);
+  const [historyCampaigns, setHistoryCampaigns] = useState<any[]>([]);
+  const [activeSkills, setActiveSkills] = useState<any[]>([]);
+  const [historySkills, setHistorySkills] = useState<any[]>([]);
+  const [message, setMessage] = useState<string | null>(null);
+  const [captureTarget, setCaptureTarget] = useState<{
+    item: any;
+    mode: "selfie" | "photo";
+  } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/attendance/assignments");
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || "Failed to load attendance");
+
+      const active = data.data?.active;
+      const history = data.data?.history;
+
+      setActiveCampaigns(
+        Array.isArray(active?.campaignItems)
+          ? active.campaignItems
+          : Array.isArray(data.data?.campaignItems)
+            ? data.data.campaignItems
+            : []
+      );
+      setHistoryCampaigns(Array.isArray(history?.campaignItems) ? history.campaignItems : []);
+      setActiveSkills(
+        Array.isArray(active?.skillItems)
+          ? active.skillItems
+          : Array.isArray(data.data?.skillItems)
+            ? data.data.skillItems
+            : []
+      );
+      setHistorySkills(Array.isArray(history?.skillItems) ? history.skillItems : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load attendance");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const campaignItems = bucket === "active" ? activeCampaigns : historyCampaigns;
+  const skillItems = bucket === "active" ? activeSkills : historySkills;
+  const isHistory = bucket === "history";
+
+  const markedToday = (summary: any) =>
+    String(summary?.last_attendance_at || "") === getLocalDateStringClient();
+  const daysPresent = (summary: any) =>
+    Number(summary?.days_attended ?? summary?.total_entries ?? 0);
+
+  function openCapture(item: any, mode: "selfie" | "photo") {
+    if (!item.assignment_id || !item.can_mark) return;
+    if (markedToday(item.attendance_summary)) {
+      setMessage("Today's attendance is already marked and cannot be changed.");
+      return;
+    }
+    setMessage(null);
+    setCaptureTarget({ item, mode });
+  }
+
+  if (loading) {
+    return (
+      <section className="field-section" style={{ margin: 16 }}>
+        <p className="subtle">Loading attendance…</p>
+      </section>
+    );
+  }
+
+  return (
+    <div className="attendance-console">
+      {error ? <div className="form-error">{error}</div> : null}
+      {message ? <div className="attendance-banner">{message}</div> : null}
+
+      <nav className="attendance-subtabs" aria-label="Attendance views">
+        <button
+          type="button"
+          className={bucket === "active" ? "is-active" : ""}
+          onClick={() => setBucket("active")}
+        >
+          Active
+          <span className="attendance-count">
+            {activeCampaigns.length + (showSkillSection ? activeSkills.length : 0)}
+          </span>
+        </button>
+        <button
+          type="button"
+          className={bucket === "history" ? "is-active" : ""}
+          onClick={() => setBucket("history")}
+        >
+          History
+          <span className="attendance-count">
+            {historyCampaigns.length + (showSkillSection ? historySkills.length : 0)}
+          </span>
+        </button>
+      </nav>
+
+      <section className="field-section">
+        <div className="section-heading">
+          <h2>{isHistory ? "Past CSR campaigns" : "Active CSR campaigns"}</h2>
+          <p className="subtle">
+            {isHistory
+              ? "Campaigns you participated in that have ended or were cancelled."
+              : "Mark yourself present once per day with a sealed selfie (up to 3 photos). Location, date and time are stamped; today's mark cannot be edited."}
+          </p>
+        </div>
+        {campaignItems.length === 0 ? (
+          <p className="subtle">
+            {isHistory ? "No past campaign projects yet." : "No active campaign projects yet."}
+          </p>
+        ) : (
+          <div className="attendance-list">
+            {campaignItems.map((item) => {
+              const marked = markedToday(item.attendance_summary);
+              return (
+                <article key={`${item.assignment_id || "x"}-${item.title}`} className="attendance-card">
+                  <div>
+                    <h3>{item.title}</h3>
+                    <p className="subtle">{item.subtitle}</p>
+                    {item.location ? <p className="subtle">{item.location}</p> : null}
+                  </div>
+                  <div className="attendance-meta">
+                    <span>Days attended: {daysPresent(item.attendance_summary)}</span>
+                    <span>
+                      Counts as: {item.volunteer_capacity}{" "}
+                      {item.volunteer_capacity === 1 ? "person" : "people"}
+                    </span>
+                    <span>Status: {String(item.lifecycle || "").replaceAll("_", " ")}</span>
+                    {item.start_date || item.end_date ? (
+                      <span>
+                        {item.start_date || "—"} → {item.end_date || "—"}
+                      </span>
+                    ) : null}
+                    <span>Last marked: {item.attendance_summary?.last_attendance_at || "Not yet"}</span>
+                  </div>
+                  {!isHistory ? (
+                    <button
+                      type="button"
+                      disabled={!item.can_mark || marked}
+                      onClick={() => openCapture(item, "selfie")}
+                    >
+                      {marked
+                        ? "Today already marked"
+                        : item.lifecycle === "yet_to_start"
+                          ? "Opens when campaign starts"
+                          : "Take selfie & mark"}
+                    </button>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {showSkillSection ? (
+        <section className="field-section">
+          <div className="section-heading">
+            <h2>{isHistory ? "Past skill / service needs" : "Skill / service needs"}</h2>
+            <p className="subtle">
+              {isHistory
+                ? "Completed or cancelled skill/service assignments."
+                : "Mark the assignee present once per day with sealed photos (up to 3). Stamped with date, time and location; today's mark cannot be edited."}
+            </p>
+          </div>
+          {skillItems.length === 0 ? (
+            <p className="subtle">
+              {isHistory
+                ? "No past skill/service assignments."
+                : "No skill/service assignments to mark right now."}
+            </p>
+          ) : (
+            <div className="attendance-list">
+              {skillItems.map((item) => {
+                const marked = markedToday(item.attendance_summary);
+                const summary = item.attendance_summary || {};
+                return (
+                  <article key={item.assignment_id} className="attendance-card">
+                    <div>
+                      <h3>{item.title}</h3>
+                      <p className="subtle">
+                        {item.subtitle}
+                        {item.assignee_email ? ` · ${item.assignee_email}` : ""}
+                      </p>
+                    </div>
+                    <div className="attendance-meta">
+                      <span>
+                        Daily rate:{" "}
+                        {item.daily_rate > 0
+                          ? `INR ${Number(item.daily_rate).toLocaleString("en-IN")}`
+                          : "Not set"}
+                      </span>
+                      <span>Days present: {daysPresent(summary)}</span>
+                      <span>Due: INR {Number(summary.total_due || 0).toLocaleString("en-IN")}</span>
+                      <span>Last marked: {summary.last_attendance_at || "Not yet"}</span>
+                    </div>
+                    {!isHistory ? (
+                      <button
+                        type="button"
+                        disabled={!item.can_mark || marked}
+                        onClick={() => openCapture(item, "photo")}
+                      >
+                        {marked ? "Today already marked" : "Capture photo & mark"}
+                      </button>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      ) : null}
+
+      {captureTarget ? (
+        <AttendanceCaptureSheet
+          item={captureTarget.item}
+          mode={captureTarget.mode}
+          onClose={() => setCaptureTarget(null)}
+          onMarked={async (msg) => {
+            setCaptureTarget(null);
+            setMessage(msg);
+            await load();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+const ATTENDANCE_MAX_PHOTOS = 3;
+
+type SealedAttendancePhoto = {
+  blob: Blob;
+  url: string;
+  name: string;
+  proofHash: string;
+  capturedAt: string;
+};
+
+function AttendanceCaptureSheet(props: {
+  item: any;
+  mode: "selfie" | "photo";
+  onClose: () => void;
+  onMarked: (message: string) => void | Promise<void>;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [photos, setPhotos] = useState<SealedAttendancePhoto[]>([]);
+  const [coords, setCoords] = useState<{
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+  } | null>(null);
+  const [locating, setLocating] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const photosRef = useRef<SealedAttendancePhoto[]>([]);
+
+  const isSelfie = props.mode === "selfie";
+  const todayLabel = getLocalDateStringClient();
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setCameraReady(false);
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    setCameraLoading(true);
+    setError(null);
+    try {
+      stopCamera();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: isSelfie ? "user" : "environment" },
+        audio: false,
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        streamRef.current = stream;
+        setCameraReady(true);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not open camera");
+    } finally {
+      setCameraLoading(false);
+    }
+  }, [isSelfie, stopCamera]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLocating(true);
+      const position = await getCurrentPosition();
+      if (cancelled) return;
+      if (!position) {
+        setError("Location is required. Enable GPS and try again.");
+        setLocating(false);
+        return;
+      }
+      setCoords(position);
+      setLocating(false);
+      await startCamera();
+    })();
+    return () => {
+      cancelled = true;
+      stopCamera();
+      photosRef.current.forEach((photo) => URL.revokeObjectURL(photo.url));
+    };
+  }, [startCamera, stopCamera]);
+
+  async function captureSealedPhoto() {
+    if (!videoRef.current || !canvasRef.current || !cameraReady || !coords) return;
+    if (photos.length >= ATTENDANCE_MAX_PHOTOS) {
+      setError(`Maximum ${ATTENDANCE_MAX_PHOTOS} photos for today.`);
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    const video = videoRef.current;
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+
+    context.save();
+    if (isSelfie) {
+      context.translate(canvas.width, 0);
+      context.scale(-1, 1);
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    context.restore();
+
+    const capturedAt = new Date().toISOString();
+    const stampTime = new Date().toLocaleString();
+    const lat = coords.latitude.toFixed(6);
+    const lng = coords.longitude.toFixed(6);
+
+    context.fillStyle = "rgba(0,0,0,0.45)";
+    context.fillRect(0, canvas.height - 110, canvas.width, 110);
+    context.font = "bold 22px monospace";
+    context.fillStyle = "#fde047";
+    context.fillText(stampTime, 16, canvas.height - 72);
+    context.fillText(`DATE ${todayLabel}`, 16, canvas.height - 44);
+    context.fillText(`GPS ${lat}, ${lng}`, 16, canvas.height - 16);
+    context.font = "16px monospace";
+    context.fillText((props.item.title || "Attendance").slice(0, 42), 16, canvas.height - 96);
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92)
+    );
+    if (!blob) {
+      setError("Could not seal photo.");
+      return;
+    }
+
+    const proofHash = await calculateHash(blob);
+    const url = URL.createObjectURL(blob);
+    setPhotos((prev) => {
+      const next = [
+        ...prev,
+        {
+          blob,
+          url,
+          name: `attendance-${todayLabel}-${prev.length + 1}.jpg`,
+          proofHash,
+          capturedAt,
+        },
+      ];
+      photosRef.current = next;
+      return next;
+    });
+    setError(null);
+  }
+
+  async function submitAttendance() {
+    if (!coords) {
+      setError("Location is required.");
+      return;
+    }
+    if (photos.length < 1) {
+      setError(isSelfie ? "Take at least one selfie." : "Take at least one photo.");
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("attendanceStatus", "present");
+      form.append("locationLatitude", String(coords.latitude));
+      form.append("locationLongitude", String(coords.longitude));
+      if (coords.accuracy != null) form.append("locationAccuracy", String(coords.accuracy));
+      if (props.mode === "photo") form.append("units", "1");
+      form.append(
+        "photoProofs",
+        JSON.stringify(
+          photos.map((photo) => ({
+            proofHash: photo.proofHash,
+            capturedAt: photo.capturedAt,
+          }))
+        )
+      );
+      for (const photo of photos) {
+        form.append("photos", photo.blob, photo.name);
+      }
+
+      const res = await apiFetch(`/api/attendance/${props.item.assignment_id}`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || "Failed to mark attendance");
+
+      const capacity = Number(data.data?.units || props.item.volunteer_capacity || 1);
+      const count = Number(data.data?.photoCount || photos.length);
+      stopCamera();
+      await props.onMarked(
+        isSelfie
+          ? capacity > 1
+            ? `Sealed present today with ${count} selfie(s) (counts as ${capacity} people).`
+            : `Sealed present today with ${count} selfie(s).`
+          : `Marked ${props.item.subtitle} present with ${count} sealed photo(s).`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not mark attendance");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="attendance-capture-sheet" role="dialog" aria-modal="true">
+      <div className="attendance-capture-card">
+        <header className="attendance-capture-header">
+          <div>
+            <h3>{isSelfie ? "Self attendance selfie" : "Skill attendance photo"}</h3>
+            <p className="subtle">{props.item.title}</p>
+          </div>
+          <button type="button" className="btn-outline" onClick={props.onClose} disabled={submitting}>
+            Cancel
+          </button>
+        </header>
+
+        <p className="subtle attendance-capture-hint">
+          Up to {ATTENDANCE_MAX_PHOTOS} photos. Once taken, photos are locked (not removable). Each
+          frame is stamped with date, time and GPS. Today&apos;s attendance cannot be edited after
+          submit.
+        </p>
+
+        {locating ? <p className="subtle">Acquiring GPS…</p> : null}
+        {coords ? (
+          <p className="attendance-capture-gps">
+            GPS locked · {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} · {todayLabel}
+          </p>
+        ) : null}
+
+        <div className="viewfinder attendance-viewfinder">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            style={isSelfie ? { transform: "scaleX(-1)" } : undefined}
+          />
+          {!cameraReady && (
+            <div className="attendance-viewfinder-empty">
+              {cameraLoading ? "Opening camera…" : "Camera offline"}
+            </div>
+          )}
+          <canvas ref={canvasRef} hidden />
+        </div>
+
+        <div className="attendance-capture-actions">
+          <button
+            type="button"
+            className="btn-outline"
+            onClick={() => void startCamera()}
+            disabled={submitting || locating || !coords}
+          >
+            {cameraReady ? "Restart camera" : "Open camera"}
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void captureSealedPhoto()}
+            disabled={
+              submitting || !cameraReady || !coords || photos.length >= ATTENDANCE_MAX_PHOTOS
+            }
+          >
+            {isSelfie ? "Capture selfie" : "Capture photo"} ({photos.length}/{ATTENDANCE_MAX_PHOTOS})
+          </button>
+        </div>
+
+        {photos.length > 0 ? (
+          <div className="attendance-sealed-thumbs">
+            {photos.map((photo, index) => (
+              <div key={photo.proofHash} className="attendance-sealed-thumb">
+                <img src={photo.url} alt={`Sealed ${index + 1}`} />
+                <span>Locked #{index + 1}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {error ? <div className="form-error">{error}</div> : null}
+
+        <button
+          type="button"
+          className="btn-primary"
+          style={{ width: "100%", marginTop: 12 }}
+          disabled={submitting || photos.length < 1 || !coords}
+          onClick={() => void submitAttendance()}
+        >
+          {submitting ? "Sealing attendance…" : "Submit sealed attendance"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function NgoCaptureView(props: any) {
+  const { isSyncing } = useAppContext();
   const [beneficiaryName, setBeneficiaryName] = useState("");
   const [notes, setNotes] = useState("");
   const [interactionType, setInteractionType] = useState("visit");
@@ -322,10 +914,23 @@ function NgoCaptureView(props: any) {
   const milestones = useLiveQuery(() => db.milestones.orderBy("milestoneOrder").toArray(), [], []);
   const activeMilestone = useMemo(() => {
     if (!milestones || milestones.length === 0) return null;
-    return milestones.find(m => m.status !== "paid") || milestones[0];
+    return milestones.find((m) => m.status !== "paid") || milestones[0];
   }, [milestones]);
 
-  if (!activeMilestone) return <section className="card-section">No CSR assignments found.</section>;
+  if (milestones === undefined || (isSyncing && milestones.length === 0)) {
+    return <CardSectionSkeleton rows={4} />;
+  }
+
+  if (!activeMilestone) {
+    return (
+      <section className="card-section">
+        <span className="section-title">CSR Milestone</span>
+        <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+          No CSR assignments found.
+        </p>
+      </section>
+    );
+  }
 
   const isLocked = activeMilestone.status !== "pending";
 
@@ -341,7 +946,7 @@ function NgoCaptureView(props: any) {
 
       <section className="card-section">
         <span className="section-title">Record Details</span>
-        <form onSubmit={e => { e.preventDefault(); props.onSeal({ beneficiaryName, interactionType, notes, projectId: activeMilestone.projectId, projectName: activeMilestone.title, milestoneId: activeMilestone.id, siteId: null, siteName: null, referencePointId: null }); }}>
+        <form onSubmit={e => { e.preventDefault(); props.onSeal({ beneficiaryName, interactionType, notes, projectId: activeMilestone.projectId, projectName: activeMilestone.title, milestoneId: activeMilestone.id, referencePointId: null }); }}>
           <fieldset disabled={isLocked || props.submitting} style={{ border: 'none' }}>
             <div className="form-group">
               <label>Beneficiary Name</label>
@@ -359,66 +964,8 @@ function NgoCaptureView(props: any) {
               <textarea value={notes} onChange={e => setNotes(e.target.value)} required rows={3} />
             </div>
           </fieldset>
-          {props.submitState && <div className="form-error" style={{ background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0' }}>{props.submitState}</div>}
-          {!isLocked && <button type="submit" className="btn-primary" disabled={props.submitting || props.capturedBlobs.length === 0}>Seal & Sync</button>}
-        </form>
-      </section>
-    </>
-  );
-}
-
-function GovCaptureView(props: any) {
-  const [selectedSiteId, setSelectedSiteId] = useState("");
-  const [selectedRefPointId, setSelectedRefPointId] = useState("");
-  const [notes, setNotes] = useState("");
-
-  const sites = useLiveQuery(() => db.awcSites.toArray(), [], []);
-  const refPoints = useLiveQuery(async () => {
-    if (!selectedSiteId) return [];
-    return db.referencePoints.where("siteId").equals(selectedSiteId).toArray();
-  }, [selectedSiteId], []);
-
-  const selectedSite = useMemo(() => sites?.find(s => s.id === selectedSiteId), [sites, selectedSiteId]);
-  const selectedRefPoint = useMemo(() => refPoints?.find(r => r.id === selectedRefPointId), [refPoints, selectedRefPointId]);
-
-  if (sites?.length === 0) return <section className="card-section">No AWC Infrastructure sites assigned.</section>;
-
-  return (
-    <>
-      <section className="card-section">
-        <span className="section-title">Site Verification</span>
-        <div className="form-group">
-          <label>AWC Site</label>
-          <select value={selectedSiteId} onChange={e => { setSelectedSiteId(e.target.value); setSelectedRefPointId(""); }}>
-            <option value="">Select site...</option>
-            {sites?.map(s => <option key={s.id} value={s.id}>{s.name} ({s.district})</option>)}
-          </select>
-        </div>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label>Verification Asset</label>
-          <select value={selectedRefPointId} onChange={e => setSelectedRefPointId(e.target.value)} disabled={!selectedSiteId}>
-            <option value="">{selectedSiteId ? "Select asset..." : "Select site first"}</option>
-            {refPoints?.map(rp => <option key={rp.id} value={rp.id}>{rp.name}</option>)}
-          </select>
-          {selectedSiteId && refPoints?.length === 0 && <p style={{ color: 'var(--error)', fontSize: '0.7rem', marginTop: '4px' }}>No assets found for this site.</p>}
-        </div>
-      </section>
-
-      <CameraCard {...props} contextLabel={selectedRefPoint?.name || "Infrastructure"} referenceImageUrl={selectedRefPoint?.imageUrl} disabled={!selectedRefPointId} />
-
-      <section className="card-section">
-        <span className="section-title">Audit Log</span>
-        <form onSubmit={e => { e.preventDefault(); props.onSeal({ beneficiaryName: null, interactionType: "verification", notes, projectId: null, projectName: selectedSite?.name || "AWC", milestoneId: null, siteId: selectedSiteId, siteName: selectedSite?.name, referencePointId: selectedRefPointId, refPoint: selectedRefPoint }); }}>
-          <fieldset disabled={props.submitting || !selectedRefPointId} style={{ border: 'none' }}>
-            <div className="form-group">
-              <label>Field Observations</label>
-              <textarea value={notes} onChange={e => setNotes(e.target.value)} required rows={3} placeholder="Describe the physical condition..." />
-            </div>
-          </fieldset>
-          {props.submitState && <div className="form-error">{props.submitState}</div>}
-          <button type="submit" className="btn-primary" disabled={props.submitting || props.capturedBlobs.length === 0 || !selectedRefPointId}>
-            {props.submitting ? "Verifying GPS..." : "Seal Infrastructure Audit"}
-          </button>
+          {props.submitState && <div className="form-success">{props.submitState}</div>}
+          {!isLocked && <button type="submit" className="btn-primary" disabled={props.submitting || props.capturedBlobs.length === 0}>Submit Evidence</button>}
         </form>
       </section>
     </>
@@ -426,42 +973,11 @@ function GovCaptureView(props: any) {
 }
 
 function CameraCard(props: any) {
-  const hasRefImage = !!props.referenceImageUrl;
-
   return (
-    <section className="card-section" style={{ opacity: props.disabled ? 0.5 : 1, pointerEvents: props.disabled ? 'none' : 'auto' }}>
+    <section className="card-section">
       <span className="section-title">Evidence Capture</span>
-      
-      {hasRefImage ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
-          {/* Reference Image Panel */}
-          <div style={{ position: 'relative', width: '100%', aspectRatio: '4/3', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1.5px solid var(--line)', background: '#1e293b' }}>
-            <img 
-              src={props.referenceImageUrl} 
-              style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }} 
-              alt="Reference Standard" 
-              onClick={() => props.onPreviewImage(props.referenceImageUrl)}
-            />
-            <div style={{ position: 'absolute', bottom: '6px', left: '6px', background: 'rgba(0,0,0,0.6)', color: '#fff', fontSize: '0.65rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 600 }}>
-              Reference Photo
-            </div>
-          </div>
 
-          {/* Active Viewfinder Panel */}
-          <div className="viewfinder" style={{ marginBottom: 0 }}>
-            <video ref={props.videoRef} autoPlay playsInline muted />
-            {!props.cameraReady && <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: '#000', color: '#fff', fontSize: '0.65rem' }}>{props.cameraLoading ? "Hardware Initialising..." : "Viewfinder Offline"}</div>}
-            <div className="viewfinder-overlay">
-              <div className="viewfinder-corner top-l" />
-              <div className="viewfinder-corner top-r" />
-              <div className="viewfinder-corner bot-l" />
-              <div className="viewfinder-corner bot-r" />
-            </div>
-            <canvas ref={props.canvasRef} hidden />
-          </div>
-        </div>
-      ) : (
-        <div className="viewfinder">
+      <div className="viewfinder">
           <video ref={props.videoRef} autoPlay playsInline muted />
           {!props.cameraReady && <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: '#000', color: '#fff', fontSize: '0.75rem' }}>{props.cameraLoading ? "Hardware Initialising..." : "Viewfinder Offline"}</div>}
           <div className="viewfinder-overlay">
@@ -472,7 +988,6 @@ function CameraCard(props: any) {
           </div>
           <canvas ref={props.canvasRef} hidden />
         </div>
-      )}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
          <button className="btn-outline" onClick={props.cameraReady ? props.stopCamera : props.startCamera} style={{ flex: 1 }}>{props.cameraReady ? "Stop Feed" : "Open Camera"}</button>
