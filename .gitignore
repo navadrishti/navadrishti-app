@@ -1,13 +1,29 @@
-.next/
+# dependencies / build
 node_modules/
-.vercel/
+.next/
 dist/
 coverage/
-.DS_Store
+out/
 *.log
-.env
-.env.local
-.vercel
-
 tsconfig.tsbuildinfo
 
+# env / local tooling
+.env
+.env.*
+!.env.example
+.vercel/
+.vscode/
+.DS_Store
+
+# Capacitor / native (not part of the web PWA deploy)
+android/
+ios/
+assets/
+scripts/
+
+# next-pwa generated (recreated on `next build`)
+public/sw.js
+public/sw.js.map
+public/workbox-*.js
+public/swe-worker-*.js
+public/fallback-*.js

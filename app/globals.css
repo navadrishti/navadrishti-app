@@ -31,10 +31,6 @@
   --status-bar-height: 0px;
 }
 
-html.capacitor-native {
-  --safe-top: max(env(safe-area-inset-top, 0px), var(--status-bar-height, 0px));
-}
-
 * {
   box-sizing: border-box;
   margin: 0;
@@ -802,12 +798,17 @@ div[data-nextjs-dev-tools-menu] {
 .brand-name-on-light { color: #0f172a; }
 .brand-powered-on-light { color: #64748b; }
 
+.brand-name-on-field { color: #ffffff; }
+.brand-powered-on-field { color: rgba(255, 255, 255, 0.82); }
+
 .header-brand,
-.header-brand .brand-name,
+.header-brand .brand-name {
+  color: #ffffff;
+}
 
-.header-brand .brand-powered,
-
-
+.header-brand .brand-powered {
+  color: rgba(255, 255, 255, 0.82);
+}
 
 .app-footer {
   margin-top: auto;
