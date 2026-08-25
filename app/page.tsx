@@ -51,9 +51,8 @@ export default function HomePage() {
         <div className="login-shell">
           <ProductBrand
             size="md"
-            showFieldSuffix
-            nameClassName="brand-name-on-light"
-            poweredClassName="brand-powered-on-light"
+            nameClassName="brand-name-on-field"
+            poweredClassName="brand-powered-on-field"
           />
 
           <section className="login-card">

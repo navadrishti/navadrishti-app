@@ -1,11 +1,14 @@
 android/
+ios/
 assets/
+scripts/
 .next/
 node_modules/
 coverage/
 dist/
+out/
 *.log
 tsconfig.tsbuildinfo
 .env
-.env.local
-.env*.local
+.env.*
+!.env.example
