@@ -8,6 +8,12 @@ import { CardSectionSkeleton, Skeleton } from "@/components/skeleton";
 import { calculateHash } from "@/lib/crypto";
 import { db } from "@/lib/db";
 import { apiFetch } from "@/lib/env";
+import {
+  applyPendingAttendanceOverlay,
+  enqueueAttendanceMark,
+  readAttendanceCache,
+  saveAttendanceCache,
+} from "@/lib/sync-engine";
 import { getDeviceId, getCurrentPosition, getLocalDateStringClient } from "@/lib/utils";
 import { randomUUID } from "@/lib/crypto";
 import type { LocalMediaRecord, LocalRecord } from "@/lib/types";
@@ -171,6 +177,8 @@ export function FieldConsole() {
         await db.syncQueue.put({
           id: recordId,
           recordId,
+          userId: session.id,
+          kind: "evidence",
           status: "pending",
           attempts: 0,
           nextAttemptAt: Date.now(),
@@ -370,6 +378,7 @@ export function FieldConsole() {
 }
 
 function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boolean }) {
+  const { session, isOnline, syncNow } = useAppContext();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [bucket, setBucket] = useState<"active" | "history">("active");
@@ -384,42 +393,71 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
   } | null>(null);
 
   const load = useCallback(async () => {
+    if (!session?.id) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch("/api/attendance/assignments");
-      const data = await res.json();
-      if (!res.ok || !data?.ok) throw new Error(data?.error || "Failed to load attendance");
+      let lists = {
+        activeCampaigns: [] as any[],
+        historyCampaigns: [] as any[],
+        activeSkills: [] as any[],
+        historySkills: [] as any[],
+      };
 
-      const active = data.data?.active;
-      const history = data.data?.history;
+      if (navigator.onLine) {
+        const res = await apiFetch("/api/attendance/assignments");
+        const data = await res.json();
+        if (!res.ok || !data?.ok) throw new Error(data?.error || "Failed to load attendance");
 
-      setActiveCampaigns(
-        Array.isArray(active?.campaignItems)
-          ? active.campaignItems
-          : Array.isArray(data.data?.campaignItems)
-            ? data.data.campaignItems
-            : []
-      );
-      setHistoryCampaigns(Array.isArray(history?.campaignItems) ? history.campaignItems : []);
-      setActiveSkills(
-        Array.isArray(active?.skillItems)
-          ? active.skillItems
-          : Array.isArray(data.data?.skillItems)
-            ? data.data.skillItems
-            : []
-      );
-      setHistorySkills(Array.isArray(history?.skillItems) ? history.skillItems : []);
+        const active = data.data?.active;
+        const history = data.data?.history;
+
+        lists = {
+          activeCampaigns: Array.isArray(active?.campaignItems)
+            ? active.campaignItems
+            : Array.isArray(data.data?.campaignItems)
+              ? data.data.campaignItems
+              : [],
+          historyCampaigns: Array.isArray(history?.campaignItems) ? history.campaignItems : [],
+          activeSkills: Array.isArray(active?.skillItems)
+            ? active.skillItems
+            : Array.isArray(data.data?.skillItems)
+              ? data.data.skillItems
+              : [],
+          historySkills: Array.isArray(history?.skillItems) ? history.skillItems : [],
+        };
+
+        await saveAttendanceCache(session.id, lists);
+      } else {
+        const cached = await readAttendanceCache(session.id);
+        if (!cached) {
+          throw new Error(
+            "No saved attendance list on this device yet. Go online once to download your assignments."
+          );
+        }
+        lists = {
+          activeCampaigns: cached.activeCampaigns || [],
+          historyCampaigns: cached.historyCampaigns || [],
+          activeSkills: cached.activeSkills || [],
+          historySkills: cached.historySkills || [],
+        };
+      }
+
+      const withPending = await applyPendingAttendanceOverlay(session.id, lists);
+      setActiveCampaigns(withPending.activeCampaigns);
+      setHistoryCampaigns(withPending.historyCampaigns);
+      setActiveSkills(withPending.activeSkills);
+      setHistorySkills(withPending.historySkills);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load attendance");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [session?.id]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, isOnline]);
 
   const campaignItems = bucket === "active" ? activeCampaigns : historyCampaigns;
   const skillItems = bucket === "active" ? activeSkills : historySkills;
@@ -433,7 +471,11 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
   function openCapture(item: any, mode: "selfie" | "photo") {
     if (!item.assignment_id || !item.can_mark) return;
     if (markedToday(item.attendance_summary)) {
-      setMessage("Today's attendance is already marked and cannot be changed.");
+      setMessage(
+        item.attendance_summary?.pending_sync
+          ? "Today's attendance is saved on this device and will sync when online."
+          : "Today's attendance is already marked and cannot be changed."
+      );
       return;
     }
     setMessage(null);
@@ -452,6 +494,11 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
     <div className="attendance-console">
       {error ? <div className="form-error">{error}</div> : null}
       {message ? <div className="attendance-banner">{message}</div> : null}
+      {!isOnline ? (
+        <div className="attendance-banner">
+          Offline mode — marks are saved on this device and sync under your login when internet returns.
+        </div>
+      ) : null}
 
       <nav className="attendance-subtabs" aria-label="Attendance views">
         <button
@@ -596,6 +643,9 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
         <AttendanceCaptureSheet
           item={captureTarget.item}
           mode={captureTarget.mode}
+          userId={session!.id}
+          isOnline={isOnline}
+          syncNow={syncNow}
           onClose={() => setCaptureTarget(null)}
           onMarked={async (msg) => {
             setCaptureTarget(null);
@@ -621,6 +671,9 @@ type SealedAttendancePhoto = {
 function AttendanceCaptureSheet(props: {
   item: any;
   mode: "selfie" | "photo";
+  userId: string;
+  isOnline: boolean;
+  syncNow: () => Promise<void>;
   onClose: () => void;
   onMarked: (message: string) => void | Promise<void>;
 }) {
@@ -772,41 +825,41 @@ function AttendanceCaptureSheet(props: {
     setSubmitting(true);
     setError(null);
     try {
-      const form = new FormData();
-      form.append("attendanceStatus", "present");
-      form.append("locationLatitude", String(coords.latitude));
-      form.append("locationLongitude", String(coords.longitude));
-      if (coords.accuracy != null) form.append("locationAccuracy", String(coords.accuracy));
-      if (props.mode === "photo") form.append("units", "1");
-      form.append(
-        "photoProofs",
-        JSON.stringify(
-          photos.map((photo) => ({
-            proofHash: photo.proofHash,
-            capturedAt: photo.capturedAt,
-          }))
-        )
-      );
-      for (const photo of photos) {
-        form.append("photos", photo.blob, photo.name);
+      await enqueueAttendanceMark({
+        userId: props.userId,
+        assignmentId: String(props.item.assignment_id),
+        mode: props.mode,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy: coords.accuracy,
+        units: props.mode === "photo" ? 1 : null,
+        title: String(props.item.title || "Attendance"),
+        photos: photos.map((photo) => ({
+          blob: photo.blob,
+          name: photo.name,
+          proofHash: photo.proofHash,
+          capturedAt: photo.capturedAt,
+        })),
+      });
+
+      const capacity = Number(props.item.volunteer_capacity || 1);
+      const count = photos.length;
+      stopCamera();
+
+      if (props.isOnline) {
+        await props.syncNow();
       }
 
-      const res = await apiFetch(`/api/attendance/${props.item.assignment_id}`, {
-        method: "POST",
-        body: form,
-      });
-      const data = await res.json();
-      if (!res.ok || !data?.ok) throw new Error(data?.error || "Failed to mark attendance");
+      const offlineNote = props.isOnline
+        ? ""
+        : " Saved on this device — will upload under your login when internet returns.";
 
-      const capacity = Number(data.data?.units || props.item.volunteer_capacity || 1);
-      const count = Number(data.data?.photoCount || photos.length);
-      stopCamera();
       await props.onMarked(
         isSelfie
           ? capacity > 1
-            ? `Sealed present today with ${count} selfie(s) (counts as ${capacity} people).`
-            : `Sealed present today with ${count} selfie(s).`
-          : `Marked ${props.item.subtitle} present with ${count} sealed photo(s).`
+            ? `Present sealed with ${count} selfie(s) (counts as ${capacity} people).${offlineNote}`
+            : `Present sealed with ${count} selfie(s).${offlineNote}`
+          : `Marked ${props.item.subtitle} present with ${count} sealed photo(s).${offlineNote}`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not mark attendance");

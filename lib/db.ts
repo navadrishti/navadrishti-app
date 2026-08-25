@@ -1,5 +1,7 @@
 import Dexie, { type Table } from "dexie";
 import type {
+  AttendanceAssignmentCache,
+  AttendanceOutboxItem,
   LocalMediaRecord,
   LocalMilestone,
   LocalRecord,
@@ -15,6 +17,8 @@ class NavadrishtiDB extends Dexie {
   syncLog!: Table<SyncLogEntry, string>;
   milestones!: Table<LocalMilestone, string>;
   referencePoints!: Table<ReferencePoint, string>;
+  attendanceCache!: Table<AttendanceAssignmentCache, string>;
+  attendanceOutbox!: Table<AttendanceOutboxItem, string>;
 
   constructor() {
     super("navadrishti-field-db");
@@ -82,7 +86,6 @@ class NavadrishtiDB extends Dexie {
       awcSites: "id, district, block, updatedAt",
     });
 
-    // Current GRAM App schema: NGO evidence + attendance only (drop CA/gov leftovers)
     this.version(10).stores({
       recordsLocal: "id, deviceId, status, userId, projectId, milestoneId, submittedAtDevice",
       mediaLocal: "id, recordId, kind, createdAt",
@@ -93,6 +96,17 @@ class NavadrishtiDB extends Dexie {
       remoteRecords: null,
       projectDrafts: null,
       awcSites: null,
+    });
+
+    this.version(11).stores({
+      recordsLocal: "id, deviceId, status, userId, projectId, milestoneId, submittedAtDevice",
+      mediaLocal: "id, recordId, kind, createdAt",
+      syncQueue: "id, recordId, userId, kind, status, nextAttemptAt, attempts",
+      syncLog: "id, recordId, createdAt",
+      milestones: "id, projectId, milestoneOrder, status",
+      referencePoints: "id, projectId, name",
+      attendanceCache: "userId, updatedAt",
+      attendanceOutbox: "id, userId, assignmentId, attendanceDate, status",
     });
 
     this.on("blocked", () => {
