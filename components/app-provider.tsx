@@ -47,7 +47,16 @@ async function clearAllLocalData() {
   try {
     await db.transaction(
       "rw",
-      [db.recordsLocal, db.mediaLocal, db.syncQueue, db.syncLog, db.milestones, db.referencePoints],
+      [
+        db.recordsLocal,
+        db.mediaLocal,
+        db.syncQueue,
+        db.syncLog,
+        db.milestones,
+        db.referencePoints,
+        db.attendanceCache,
+        db.attendanceOutbox,
+      ],
       async () => {
         await db.recordsLocal.clear();
         await db.mediaLocal.clear();
@@ -55,6 +64,8 @@ async function clearAllLocalData() {
         await db.syncLog.clear();
         await db.milestones.clear();
         await db.referencePoints.clear();
+        await db.attendanceCache.clear();
+        await db.attendanceOutbox.clear();
       }
     );
     console.log("[AppProvider] Full local data wipe complete (user switch).");
@@ -71,11 +82,12 @@ async function clearAllLocalData() {
  */
 async function clearSharedCacheData() {
   try {
-    await db.transaction("rw", [db.milestones, db.referencePoints], async () => {
+    await db.transaction("rw", [db.milestones, db.referencePoints, db.attendanceCache], async () => {
       await db.milestones.clear();
       await db.referencePoints.clear();
+      await db.attendanceCache.clear();
     });
-    console.log("[AppProvider] Shared cache cleared (sign-out).");
+    console.log("[AppProvider] Shared cache cleared (sign-out). Pending uploads preserved.");
   } catch (err) {
     console.error("[AppProvider] Failed to clear shared cache:", err);
   }
@@ -148,9 +160,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         await pullProjectData();
       }
 
-      // Process uploads in queue (NGO evidence)
-      logStep("syncNow: Processing sync queue");
-      const result = await processSyncQueue();
+      // Process uploads in queue for THIS signed-in user only (evidence + attendance)
+      logStep(`syncNow: Processing sync queue for user ${session.id}`);
+      const result = await processSyncQueue(session.id);
       setLastSync(result);
       logStep(`syncNow: Completed. Queue processed: ${result.processed}, succeeded: ${result.succeeded}`);
     } catch (err: any) {
