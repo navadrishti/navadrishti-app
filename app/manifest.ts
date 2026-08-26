@@ -8,8 +8,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: `${PRODUCT_NAME} | Digital OS for Social Impact — field attendance and evidence capture`,
     start_url: "/",
     display: "standalone",
-    background_color: "#0067b9",
-    theme_color: "#0067b9",
+    background_color: "#F6F5F1",
+    theme_color: "#2B3E41",
     orientation: "portrait",
     icons: [
       {
