@@ -14,6 +14,8 @@
   --gram-muted: #6E777E;
   --gram-faint: #959BA1;
   --gram-border: #E8EAE6;
+  --gram-sage: #F1F6F3;
+  --gram-sage-muted: #DCE8E3;
   --gram-avatar-0: #66877D;
   --gram-avatar-1: #829D8E;
   --gram-avatar-2: #6F7F85;
@@ -947,8 +949,8 @@ div[data-nextjs-dev-tools-menu] {
 }
 
 .field-hub-tabs button.is-active {
-  color: var(--gram-ink);
-  border-bottom-color: var(--udaan-orange);
+  color: var(--udaan-blue);
+  border-bottom-color: var(--udaan-blue);
 }
 
 .attendance-subtabs {
@@ -972,9 +974,9 @@ div[data-nextjs-dev-tools-menu] {
 }
 
 .attendance-subtabs button.is-active {
-  color: var(--gram-ink);
-  border-color: var(--gram-border);
-  background: var(--udaan-cream);
+  color: var(--udaan-blue);
+  border-color: var(--gram-sage-muted);
+  background: var(--gram-sage);
 }
 
 .attendance-count {
@@ -990,8 +992,8 @@ div[data-nextjs-dev-tools-menu] {
 }
 
 .attendance-subtabs button.is-active .attendance-count {
-  background: #F0D8C3;
-  color: #C85F18;
+  background: var(--gram-sage-muted);
+  color: var(--udaan-blue);
 }
 
 .field-hub-body {
