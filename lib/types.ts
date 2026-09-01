@@ -11,6 +11,7 @@ export type AppSession = {
   expiresAt: number;
   createdAt: string;
   deviceId?: string;
+  avatarUrl?: string | null;
 };
 
 export type LocalRecordStatus = "pending" | "syncing" | "synced" | "failed";

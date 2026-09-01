@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { resolveUserAvatarUrl } from "@/lib/utils";
 import { getServerSupabaseClient } from "@/lib/supabase-server";
 
 interface AuthDebugUser {
@@ -22,6 +23,7 @@ export interface NgoAuthResult {
   ngoName?: string;
   email?: string;
   role?: string;
+  avatarUrl?: string | null;
   debug: {
     stage: string;
     authEmail: string;
@@ -84,7 +86,7 @@ export async function authenticateNgoWithPassword(
   const { data: userRow, error: userError } = await supabase
     .from("users")
     .select(
-      "id, name, email, password, user_type, verified, email_verified, phone_verified, identity_verified, verification_status, account_status, device_id, profile_data"
+      "id, name, email, password, user_type, verified, email_verified, phone_verified, identity_verified, verification_status, account_status, device_id, profile_image, profile_data"
     )
     .ilike("email", normalizedEmail)
     .maybeSingle();
@@ -156,20 +158,16 @@ export async function authenticateNgoWithPassword(
 
   const displayName =
     (typeof userRow.name === "string" && userRow.name.trim()) || normalizedEmail;
+  const avatarUrl = resolveUserAvatarUrl({
+    profileImage: userRow.profile_image,
+    profileData: userRow.profile_data,
+  });
 
   if (userType === "ngo") {
-    if (deviceId) {
-      const storedDeviceId = userRow.device_id;
-      if (!storedDeviceId) {
-        await supabase.from("users").update({ device_id: deviceId }).eq("id", userRow.id);
-      } else if (storedDeviceId !== deviceId) {
-        return {
-          allowed: false,
-          reason:
-            "Access Denied: This account is locked to a different device. Contact administration for a hardware transfer.",
-          debug,
-        };
-      }
+    if (deviceId && userRow.device_id !== deviceId) {
+      // Account-based access: any verified device may sign in. We still record the
+      // latest device_id for audit / admin visibility, but we do not hard-lock hardware.
+      await supabase.from("users").update({ device_id: deviceId }).eq("id", userRow.id);
     }
 
     debug.stage = "lookup-ngo-verification";
@@ -221,6 +219,7 @@ export async function authenticateNgoWithPassword(
       ngoName:
         (typeof ngoVerif?.ngo_name === "string" && ngoVerif.ngo_name.trim()) || displayName,
       email: typeof userRow.email === "string" ? userRow.email : normalizedEmail,
+      avatarUrl,
       debug: { ...debug, stage: "authenticated" },
     };
   }
@@ -245,6 +244,7 @@ export async function authenticateNgoWithPassword(
     role: "individual",
     ngoName: displayName,
     email: typeof userRow.email === "string" ? userRow.email : normalizedEmail,
+    avatarUrl,
     debug: { ...debug, stage: "authenticated" },
   };
 }

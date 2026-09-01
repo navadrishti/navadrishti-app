@@ -86,6 +86,7 @@ export async function POST(request: NextRequest) {
     expiresAt: Date.now() + maxAge * 1000,
     deviceId: deviceId,
     createdAt: new Date().toISOString(),
+    avatarUrl: authResult.avatarUrl ?? null,
   });
 
   const response = NextResponse.json({
@@ -99,6 +100,7 @@ export async function POST(request: NextRequest) {
       role: authResult.role,
       deviceId: deviceId,
       createdAt: new Date().toISOString(),
+      avatarUrl: authResult.avatarUrl ?? null,
     },
     debug: authResult.debug,
   });

@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { processSyncQueue, pullProjectData, logStep, logStepError, type SyncRunResult } from "@/lib/sync-engine";
 import { apiFetch, FIELD_APP_NAME } from "@/lib/env";
+import { resolveUserAvatarUrl } from "@/lib/utils";
 import { getSupabaseClient } from "@/lib/supabase-browser";
 import { db } from "@/lib/db";
 import type { AppSession, SessionRole } from "@/lib/types";
@@ -186,6 +187,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearInterval(timer);
   }, [isOnline, ready, session, syncNow]);
 
+  useEffect(() => {
+    if (!ready || !session) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void apiFetch("/api/session")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.profile || !session) return;
+
+        const avatarUrl =
+          typeof data.profile.avatarUrl === "string" || data.profile.avatarUrl === null
+            ? data.profile.avatarUrl
+            : undefined;
+        const name =
+          typeof data.profile.name === "string" && data.profile.name.trim()
+            ? data.profile.name.trim()
+            : session.name;
+
+        if (avatarUrl === session.avatarUrl && name === session.name) {
+          return;
+        }
+
+        const nextSession: AppSession = {
+          ...session,
+          name,
+          ngoName: name,
+          avatarUrl: avatarUrl ?? session.avatarUrl ?? null,
+        };
+
+        window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
+        setSession(nextSession);
+      })
+      .catch(() => {
+        // Profile refresh is best-effort; cached session remains usable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, session?.id]);
+
   const signIn = useCallback(async ({ email, password, role }: SignInInput) => {
     const supabase = getSupabaseClient();
     if (!supabase) {
@@ -209,12 +254,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       email_verified: boolean;
       phone_verified: boolean;
       verification_status: string;
+      profile_data?: unknown;
+      profile_image?: string | null;
     }
 
     // 2. Fetch User Profile and Verification status
     const { data: profileData, error: profileError } = await supabase
       .from("users")
-      .select("id, name, user_type, email_verified, phone_verified, verification_status")
+      .select(
+        "id, name, user_type, email_verified, phone_verified, verification_status, profile_image, profile_data",
+      )
       .eq("email", userEmail)
       .single();
 
@@ -256,6 +305,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       issuedAt: Date.now(),
       expiresAt: Date.now() + 60 * 60 * 24 * 7 * 1000,
       createdAt: new Date().toISOString(),
+      avatarUrl: resolveUserAvatarUrl({
+        profileImage: profile.profile_image,
+        profileData: profile.profile_data,
+      }),
     };
 
     // Full wipe only when a DIFFERENT user signs in
