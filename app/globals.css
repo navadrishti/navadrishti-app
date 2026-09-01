@@ -39,6 +39,8 @@
   --shadow-sm: 0 2px 14px rgba(30, 36, 42, 0.035);
   --shadow-md: 0 2px 14px rgba(30, 36, 42, 0.05);
   --success: #4F6B5C;
+  --status-online: #3F8F65;
+  --status-offline: #8C5555;
   --warning: #8A7350;
   --error: #8C5555;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -72,6 +74,11 @@ body {
   flex-direction: column;
   padding-bottom: 24px;
   background: var(--bg-app);
+}
+
+.app.field-hub {
+  min-height: 100dvh;
+  padding-bottom: 0;
 }
 
 .app-header {
@@ -718,6 +725,36 @@ input:focus, select:focus, textarea:focus {
 .skeleton-chip { height: 28px; width: 88px; border-radius: 999px; }
 .skeleton-camera { width: 100%; aspect-ratio: 4/3; border-radius: var(--radius-md); }
 .skeleton-ledger { width: 100%; height: 56px; }
+.skeleton-brand-lockup { width: 132px; height: 38px; border-radius: 8px; }
+.skeleton-avatar { width: 46px; height: 46px; border-radius: 999px; flex-shrink: 0; }
+.skeleton-hub-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 0; background: #fff; }
+.skeleton-hub-tab { height: 44px; border-radius: 0; }
+.skeleton-attendance-subtabs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.skeleton-attendance-tab { height: 42px; border-radius: 999px; }
+.skeleton-attendance-section { display: grid; gap: 12px; }
+.skeleton-attendance-card { width: 100%; height: 188px; border-radius: 10px; }
+.skeleton-attendance-console { pointer-events: none; }
+.skeleton-footer-copy { width: 44px; height: 14px; }
+.skeleton-footer-brand { width: 108px; height: 30px; border-radius: 8px; }
+.skeleton-footer-link { width: 84px; height: 12px; }
+.viewfinder-skeleton {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #101820;
+  padding: 16px;
+}
+.skeleton-viewfinder {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-md);
+  opacity: 0.45;
+}
+.skeleton-inline-row {
+  width: 160px;
+  margin-bottom: 8px;
+}
 .login-card-skeleton { pointer-events: none; }
 
 button .btn-spinner {
@@ -828,7 +865,8 @@ div[data-nextjs-dev-tools-menu] {
 
 .app-footer {
   margin-top: auto;
-  padding: 16px;
+  flex-shrink: 0;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
   background: var(--udaan-navy);
   color: #fff;
 }
@@ -893,7 +931,7 @@ div[data-nextjs-dev-tools-menu] {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--gram-page);
+  background: var(--udaan-cream);
 }
 
 .field-hub-header {
@@ -903,7 +941,136 @@ div[data-nextjs-dev-tools-menu] {
   gap: 12px;
   padding: 14px 16px;
   background: var(--udaan-navy);
-  color: #fff;
+  color: var(--udaan-white);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.field-hub-brand-only {
+  min-width: 0;
+}
+
+.field-hub-welcome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--udaan-white);
+  border-bottom: 1px solid var(--gram-border);
+}
+
+.field-hub-welcome-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.field-hub-welcome-copy {
+  min-width: 0;
+}
+
+.field-hub-welcome-label {
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--gram-faint);
+}
+
+.field-hub-welcome-name {
+  margin: 3px 0 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--gram-ink);
+  line-height: 1.2;
+}
+
+.field-hub-welcome-status {
+  margin: 3px 0 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.field-hub-welcome-status.is-online {
+  color: var(--status-online);
+}
+
+.field-hub-welcome-status.is-offline {
+  color: var(--status-offline);
+}
+
+.field-hub-welcome-status.is-syncing {
+  color: var(--udaan-orange);
+}
+
+.field-hub-sync-badge {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--gram-sage);
+  border: 1px solid var(--gram-sage-muted);
+  color: var(--udaan-blue);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  text-align: center;
+  max-width: 108px;
+}
+
+.field-hub-avatar {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+}
+
+.field-hub-avatar-image,
+.field-hub-avatar-fallback {
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 2px solid var(--udaan-white);
+  box-shadow: 0 0 0 1px var(--gram-sage-muted);
+}
+
+.field-hub-avatar-fallback {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, var(--gram-avatar-0), var(--gram-avatar-1));
+  color: var(--gram-avatar-initials);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.field-hub-avatar-status {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  border: 2px solid var(--udaan-white);
+  box-shadow: 0 0 0 1px rgba(43, 62, 65, 0.12);
+}
+
+.field-hub-avatar-status.is-online {
+  background: var(--status-online);
+}
+
+.field-hub-avatar-status.is-offline {
+  background: var(--status-offline);
+}
+
+.field-hub-avatar-status.is-syncing {
+  background: var(--udaan-orange);
+  animation: pulse 1.5s infinite;
 }
 
 .field-hub-brand {
@@ -998,6 +1165,8 @@ div[data-nextjs-dev-tools-menu] {
 
 .field-hub-body {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
 }
 
@@ -1055,6 +1224,36 @@ div[data-nextjs-dev-tools-menu] {
 
 .attendance-card button {
   width: 100%;
+}
+
+.btn-attendance-mark {
+  width: 100%;
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: var(--udaan-navy);
+  color: var(--udaan-white);
+  box-shadow: 0 2px 10px rgba(43, 62, 65, 0.2);
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.btn-attendance-mark:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.btn-attendance-mark:not(:disabled):hover {
+  background: var(--udaan-blue);
+  box-shadow: 0 3px 12px rgba(58, 80, 84, 0.24);
+}
+
+.btn-attendance-mark:disabled {
+  background: #E8EAE6;
+  color: var(--gram-muted);
+  box-shadow: none;
+  cursor: not-allowed;
 }
 
 .attendance-banner {
