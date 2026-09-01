@@ -4,7 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { useLiveQuery } from "dexie-react-hooks";
 import { useAppContext } from "@/components/app-provider";
 import { AppFooter, ProductBrand } from "@/components/product-brand";
-import { CardSectionSkeleton, Skeleton } from "@/components/skeleton";
+import { AttendancePanelSkeleton, CardSectionSkeleton, FieldConsoleSkeleton, Skeleton } from "@/components/skeleton";
 import { calculateHash } from "@/lib/crypto";
 import { db } from "@/lib/db";
 import { apiFetch } from "@/lib/env";
@@ -14,7 +14,7 @@ import {
   readAttendanceCache,
   saveAttendanceCache,
 } from "@/lib/sync-engine";
-import { getDeviceId, getCurrentPosition, getLocalDateStringClient } from "@/lib/utils";
+import { getDeviceId, getCurrentPosition, getLocalDateStringClient, cloudinaryAvatarUrl, getInitials } from "@/lib/utils";
 import { randomUUID } from "@/lib/crypto";
 import type { LocalMediaRecord, LocalRecord } from "@/lib/types";
 
@@ -23,6 +23,60 @@ if (typeof window !== "undefined") {
   if (process.env.NODE_ENV === "development") {
     (window as unknown as { __navadrishti_db?: typeof db }).__navadrishti_db = db;
   }
+}
+
+function UserWelcomeNav({
+  name,
+  avatarUrl,
+  isOnline,
+  isSyncing = false,
+  pendingSyncCount = 0,
+}: {
+  name: string;
+  avatarUrl?: string | null;
+  isOnline: boolean;
+  isSyncing?: boolean;
+  pendingSyncCount?: number;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const displayName = name.trim() || "User";
+  const avatarSrc = avatarUrl && !imageFailed ? cloudinaryAvatarUrl(avatarUrl, 88) : null;
+  const statusClass = isSyncing ? "is-syncing" : isOnline ? "is-online" : "is-offline";
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [avatarUrl]);
+
+  return (
+    <section className="field-hub-welcome" aria-label="Welcome">
+      <div className="field-hub-welcome-main">
+        <div className="field-hub-avatar" aria-hidden="true">
+          {avatarSrc ? (
+            <img
+              src={avatarSrc}
+              alt=""
+              className="field-hub-avatar-image"
+              onError={() => setImageFailed(true)}
+            />
+          ) : (
+            <span className="field-hub-avatar-fallback">{getInitials(displayName)}</span>
+          )}
+          <span className={`field-hub-avatar-status ${statusClass}`} />
+        </div>
+
+        <div className="field-hub-welcome-copy">
+          <p className="field-hub-welcome-label">Welcome</p>
+          <p className="field-hub-welcome-name">{displayName}</p>
+        </div>
+      </div>
+
+      {pendingSyncCount > 0 ? (
+        <span className="field-hub-sync-badge" aria-live="polite">
+          {pendingSyncCount} awaiting sync
+        </span>
+      ) : null}
+    </section>
+  );
 }
 
 export function FieldConsole() {
@@ -70,6 +124,20 @@ export function FieldConsole() {
       mediaCount
     };
   }, [session?.id], { pending: 0, synced: 0, mediaCount: 0 });
+
+  const pendingSyncCount = useLiveQuery(async () => {
+    if (!session?.id) return 0;
+    const pendingStatuses = new Set(["pending", "syncing", "failed"]);
+    const [records, outbox] = await Promise.all([
+      db.recordsLocal.where("userId").equals(session.id).toArray(),
+      db.attendanceOutbox.where("userId").equals(session.id).toArray(),
+    ]);
+
+    return (
+      records.filter((row) => pendingStatuses.has(row.status)).length +
+      outbox.filter((row) => pendingStatuses.has(row.status)).length
+    );
+  }, [session?.id], 0);
 
   // Camera Controls
   const stopCamera = useCallback(() => {
@@ -201,7 +269,7 @@ export function FieldConsole() {
     }
   }
 
-  if (sessionLoading) return null;
+  if (sessionLoading) return <FieldConsoleSkeleton />;
 
   const statsLoading = stats === undefined;
   const recordsLoading = records === undefined;
@@ -211,15 +279,7 @@ export function FieldConsole() {
   return (
     <main className="app field-hub">
       <header className="app-header field-hub-header">
-        <div className="header-left field-hub-brand">
-          <ProductBrand size="sm" className="header-brand" />
-          <div>
-            <h1 className="header-org field-hub-user">{session?.ngoName || session?.name || "User"}</h1>
-            <p className="header-meta">
-              {isOnline ? (isSyncing ? "Syncing…" : "Online") : "Offline"}
-            </p>
-          </div>
-        </div>
+        <ProductBrand size="sm" className="header-brand field-hub-brand-only" />
         <div className="field-hub-actions">
           {!showAttendance ? (
             <button type="button" className="btn-outline" onClick={() => void syncNow()} disabled={!isOnline || isSyncing}>
@@ -229,6 +289,14 @@ export function FieldConsole() {
           <button type="button" className="btn-outline" onClick={signOut}>Sign Out</button>
         </div>
       </header>
+
+      <UserWelcomeNav
+        name={session?.ngoName || session?.name || "User"}
+        avatarUrl={session?.avatarUrl}
+        isOnline={isOnline}
+        isSyncing={isSyncing}
+        pendingSyncCount={pendingSyncCount}
+      />
 
       {showHubTabs ? (
         <nav className="field-hub-tabs" aria-label="App sections">
@@ -249,6 +317,7 @@ export function FieldConsole() {
         </nav>
       ) : null}
 
+      <div className="field-hub-body">
       {showAttendance ? (
         <AttendancePanel showSkillSection={session?.role === "ngo"} />
       ) : (
@@ -325,6 +394,7 @@ export function FieldConsole() {
           </section>
         </>
       )}
+      </div>
 
       {activePreviewUrl && (
         <div
@@ -483,11 +553,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
   }
 
   if (loading) {
-    return (
-      <section className="field-section" style={{ margin: 16 }}>
-        <p className="subtle">Loading attendance…</p>
-      </section>
-    );
+    return <AttendancePanelSkeleton showSkillSection={showSkillSection} />;
   }
 
   return (
@@ -529,7 +595,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
           <p className="subtle">
             {isHistory
               ? "Campaigns you participated in that have ended or were cancelled."
-              : "Mark yourself present once per day with a sealed selfie (up to 3 photos). Location, date and time are stamped; today's mark cannot be edited."}
+              : "Mark yourself present once per day with a sealed selfie (up to 3 photos). For volunteer NGOs only — lead NGOs coordinate the campaign and do not self-mark."}
           </p>
         </div>
         {campaignItems.length === 0 ? (
@@ -564,6 +630,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                   {!isHistory ? (
                     <button
                       type="button"
+                      className="btn-attendance-mark"
                       disabled={!item.can_mark || marked}
                       onClick={() => openCapture(item, "selfie")}
                     >
@@ -625,6 +692,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                     {!isHistory ? (
                       <button
                         type="button"
+                        className="btn-attendance-mark"
                         disabled={!item.can_mark || marked}
                         onClick={() => openCapture(item, "photo")}
                       >
@@ -887,7 +955,12 @@ function AttendanceCaptureSheet(props: {
           submit.
         </p>
 
-        {locating ? <p className="subtle">Acquiring GPS…</p> : null}
+        {locating ? (
+          <div className="skeleton-inline-row" aria-busy="true">
+            <Skeleton className="skeleton-line-sm" />
+            <span className="sr-only">Acquiring GPS</span>
+          </div>
+        ) : null}
         {coords ? (
           <p className="attendance-capture-gps">
             GPS locked · {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} · {todayLabel}
@@ -903,8 +976,11 @@ function AttendanceCaptureSheet(props: {
             style={isSelfie ? { transform: "scaleX(-1)" } : undefined}
           />
           {!cameraReady && (
-            <div className="attendance-viewfinder-empty">
-              {cameraLoading ? "Opening camera…" : "Camera offline"}
+            <div className="viewfinder-skeleton attendance-viewfinder-empty" aria-busy={cameraLoading}>
+              {cameraLoading ? <Skeleton className="skeleton-viewfinder" /> : null}
+              <span className="sr-only">
+                {cameraLoading ? "Opening camera" : "Camera offline"}
+              </span>
             </div>
           )}
           <canvas ref={canvasRef} hidden />
@@ -1032,7 +1108,14 @@ function CameraCard(props: any) {
 
       <div className="viewfinder">
           <video ref={props.videoRef} autoPlay playsInline muted />
-          {!props.cameraReady && <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: '#000', color: '#fff', fontSize: '0.75rem' }}>{props.cameraLoading ? "Hardware Initialising..." : "Viewfinder Offline"}</div>}
+          {!props.cameraReady && (
+            <div className="viewfinder-skeleton" aria-busy={props.cameraLoading}>
+              {props.cameraLoading ? <Skeleton className="skeleton-viewfinder" /> : null}
+              <span className="sr-only">
+                {props.cameraLoading ? "Opening camera" : "Camera offline"}
+              </span>
+            </div>
+          )}
           <div className="viewfinder-overlay">
             <div className="viewfinder-corner top-l" />
             <div className="viewfinder-corner top-r" />

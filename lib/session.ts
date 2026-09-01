@@ -14,6 +14,7 @@ export interface AppSession {
   expiresAt: number;
   deviceId: string;
   createdAt: string;
+  avatarUrl?: string | null;
 }
 
 export const SESSION_COOKIE_NAME = "navadrishti_session";
