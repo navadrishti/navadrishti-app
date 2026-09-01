@@ -106,6 +106,22 @@ function getVolunteerApplicationForUser(impactMetrics: unknown, userId: number) 
   );
 }
 
+function getCampaignLeadNgoId(impactMetrics: unknown): number {
+  const impact = safeJson(impactMetrics);
+  return Number(impact.selected_lead_ngo_id || 0);
+}
+
+/** Lead NGOs coordinate CSR campaigns; they do not self-mark volunteer attendance. */
+function isCampaignLeadNgo(impactMetrics: unknown, userId: number): boolean {
+  const leadNgoId = getCampaignLeadNgoId(impactMetrics);
+  return leadNgoId > 0 && leadNgoId === Number(userId);
+}
+
+function isCampaignVolunteerApplicant(impactMetrics: unknown, userId: number): boolean {
+  if (isCampaignLeadNgo(impactMetrics, userId)) return false;
+  return Boolean(getVolunteerApplicationForUser(impactMetrics, userId));
+}
+
 function getNgoNeedFulfillmentMode(request: Record<string, any> | null | undefined): string {
   const type = String(request?.request_type || request?.category || "").toLowerCase();
   if (type.includes("material") || type.includes("deliver")) return "material";
@@ -149,7 +165,7 @@ export async function listAttendanceAssignments(userId: number) {
     .order("created_at", { ascending: false });
 
   const volunteered = (campaigns || []).filter((campaign) =>
-    Boolean(getVolunteerApplicationForUser(campaign.impact_metrics, userId))
+    isCampaignVolunteerApplicant(campaign.impact_metrics, userId)
   );
 
   const companyIds = [
@@ -169,6 +185,7 @@ export async function listAttendanceAssignments(userId: number) {
   for (const campaign of volunteered) {
     const application = getVolunteerApplicationForUser(campaign.impact_metrics, userId);
     if (!application) continue;
+    if (isCampaignLeadNgo(campaign.impact_metrics, userId)) continue;
 
     const lifecycle = getCampaignLifecycle({
       startDate: campaign.start_date,
@@ -356,9 +373,13 @@ export async function markAttendance(input: {
     const campaignId = resolveCampaignIdFromAssignment(assignment);
     const { data: campaign } = await supabase
       .from("campaigns")
-      .select("start_date, end_date, status")
+      .select("start_date, end_date, status, impact_metrics")
       .eq("id", campaignId)
       .maybeSingle();
+
+    if (isCampaignLeadNgo(campaign?.impact_metrics, userId)) {
+      throw new Error("Lead NGOs do not mark volunteer attendance for themselves");
+    }
 
     const lifecycle = getCampaignLifecycle({
       startDate: campaign?.start_date as string | null,
