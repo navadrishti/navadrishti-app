@@ -138,7 +138,10 @@ export async function authenticateNgoWithPassword(
   const displayName =
     (typeof userRow.name === "string" && userRow.name.trim()) ||
     (typeof userRow.email === "string" ? userRow.email : normalizedEmail);
-  const avatarUrl = resolveUserAvatarUrl(userRow);
+  const avatarUrl = resolveUserAvatarUrl({
+    profileImage: userRow.profile_image,
+    profileData: userRow.profile_data,
+  });
 
   if (userType === "ngo") {
     debug.stage = "lookup-ngo-verification";
