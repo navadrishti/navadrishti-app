@@ -96,13 +96,23 @@ function isHistoryLifecycle(lifecycle: string): boolean {
   return lifecycle === "finished" || lifecycle === "cancelled";
 }
 
+/** Applicant on application-like rows (renamed from volunteer_id). Dual-read for cutover. */
+function getApplicationApplicantUserId(row: Record<string, unknown> | null | undefined): number {
+  if (!row) return 0;
+  return Number(row.applicant_user_id ?? row.volunteer_id ?? 0) || 0;
+}
+
 function getVolunteerApplicationForUser(impactMetrics: unknown, userId: number) {
   const impact = safeJson(impactMetrics);
   const applications = Array.isArray(impact.volunteer_applications)
     ? impact.volunteer_applications
     : [];
   return (
-    applications.find((entry: any) => Number(entry?.user_id || 0) === Number(userId)) || null
+    applications.find((entry: any) => {
+      const applicantId =
+        getApplicationApplicantUserId(entry) || Number(entry?.user_id || 0) || 0;
+      return applicantId === Number(userId);
+    }) || null
   );
 }
 
@@ -281,6 +291,7 @@ export async function listAttendanceAssignments(userId: number) {
 
   const ownedSkill = rows.filter((row) => {
     const table = String(row.application_table || "");
+    // Prefer service_request_applications; keep service_volunteers for old offline rows.
     const isApplicationTable =
       table === "service_request_applications" || table === "service_volunteers";
     return (
@@ -558,7 +569,11 @@ export async function markAttendance(input: {
       target_type: assignment.target_type,
       target_id: assignment.target_id,
       application_table: assignment.application_table,
-      application_id: assignment.application_id,
+      // Prefer application_id; accept legacy volunteer_assignment_id on old offline rows.
+      application_id:
+        assignment.application_id ??
+        (assignment as Record<string, unknown>).volunteer_assignment_id ??
+        null,
       attendance_date: today,
       attendance_status: status,
       attendance_source: attendanceSource,
