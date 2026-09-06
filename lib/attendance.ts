@@ -106,20 +106,52 @@ function getVolunteerApplicationForUser(impactMetrics: unknown, userId: number) 
   );
 }
 
-function getCampaignLeadNgoId(impactMetrics: unknown): number {
-  const impact = safeJson(impactMetrics);
+function getCampaignLeadNgoId(
+  impactMetricsOrCampaign: unknown,
+  campaignLeadColumn?: number | null
+): number {
+  const fromArg = Number(campaignLeadColumn || 0);
+  if (fromArg > 0) return fromArg;
+
+  if (
+    impactMetricsOrCampaign &&
+    typeof impactMetricsOrCampaign === "object" &&
+    !Array.isArray(impactMetricsOrCampaign)
+  ) {
+    const obj = impactMetricsOrCampaign as Record<string, any>;
+    const fromColumn = Number(obj.lead_ngo_user_id || 0);
+    if (fromColumn > 0) return fromColumn;
+    if (Object.prototype.hasOwnProperty.call(obj, "impact_metrics")) {
+      return Number(safeJson(obj.impact_metrics).selected_lead_ngo_id || 0);
+    }
+  }
+
+  const impact = safeJson(impactMetricsOrCampaign);
   return Number(impact.selected_lead_ngo_id || 0);
 }
 
 /** Lead NGOs coordinate CSR campaigns; they do not self-mark volunteer attendance. */
-function isCampaignLeadNgo(impactMetrics: unknown, userId: number): boolean {
-  const leadNgoId = getCampaignLeadNgoId(impactMetrics);
+function isCampaignLeadNgo(
+  impactMetricsOrCampaign: unknown,
+  userId: number,
+  campaignLeadColumn?: number | null
+): boolean {
+  const leadNgoId = getCampaignLeadNgoId(impactMetricsOrCampaign, campaignLeadColumn);
   return leadNgoId > 0 && leadNgoId === Number(userId);
 }
 
-function isCampaignVolunteerApplicant(impactMetrics: unknown, userId: number): boolean {
-  if (isCampaignLeadNgo(impactMetrics, userId)) return false;
-  return Boolean(getVolunteerApplicationForUser(impactMetrics, userId));
+function isCampaignVolunteerApplicant(
+  impactMetricsOrCampaign: unknown,
+  userId: number
+): boolean {
+  if (isCampaignLeadNgo(impactMetricsOrCampaign, userId)) return false;
+  const impact = Object.prototype.hasOwnProperty.call(
+    (impactMetricsOrCampaign as any) || {},
+    "impact_metrics"
+  )
+    ? (impactMetricsOrCampaign as any).impact_metrics
+    : impactMetricsOrCampaign;
+  return Boolean(getVolunteerApplicationForUser(impact, userId));
 }
 
 function getNgoNeedFulfillmentMode(request: Record<string, any> | null | undefined): string {
@@ -160,12 +192,12 @@ export async function listAttendanceAssignments(userId: number) {
   const { data: campaigns } = await supabase
     .from("campaigns")
     .select(
-      "id, title, description, category, location, status, start_date, end_date, impact_metrics, company_id"
+      "id, title, description, category, location, status, start_date, end_date, impact_metrics, lead_ngo_user_id, company_id"
     )
     .order("created_at", { ascending: false });
 
   const volunteered = (campaigns || []).filter((campaign) =>
-    isCampaignVolunteerApplicant(campaign.impact_metrics, userId)
+    isCampaignVolunteerApplicant(campaign, userId)
   );
 
   const companyIds = [
@@ -185,7 +217,7 @@ export async function listAttendanceAssignments(userId: number) {
   for (const campaign of volunteered) {
     const application = getVolunteerApplicationForUser(campaign.impact_metrics, userId);
     if (!application) continue;
-    if (isCampaignLeadNgo(campaign.impact_metrics, userId)) continue;
+    if (isCampaignLeadNgo(campaign, userId)) continue;
 
     const lifecycle = getCampaignLifecycle({
       startDate: campaign.start_date,
@@ -247,13 +279,17 @@ export async function listAttendanceAssignments(userId: number) {
     });
   }
 
-  const ownedSkill = rows.filter(
-    (row) =>
+  const ownedSkill = rows.filter((row) => {
+    const table = String(row.application_table || "");
+    const isApplicationTable =
+      table === "service_request_applications" || table === "service_volunteers";
+    return (
       Number(row.owner_user_id) === Number(userId) &&
       row.target_type === "service_request" &&
-      String(row.application_table || "") === "service_volunteers" &&
+      isApplicationTable &&
       !isCampaignVolunteerAssignment(row)
-  );
+    );
+  });
 
   const requestIds = [
     ...new Set(ownedSkill.map((row) => Number(row.target_id || 0)).filter((id) => id > 0)),
@@ -373,11 +409,11 @@ export async function markAttendance(input: {
     const campaignId = resolveCampaignIdFromAssignment(assignment);
     const { data: campaign } = await supabase
       .from("campaigns")
-      .select("start_date, end_date, status, impact_metrics")
+      .select("start_date, end_date, status, impact_metrics, lead_ngo_user_id")
       .eq("id", campaignId)
       .maybeSingle();
 
-    if (isCampaignLeadNgo(campaign?.impact_metrics, userId)) {
+    if (isCampaignLeadNgo(campaign, userId)) {
       throw new Error("Lead NGOs do not mark volunteer attendance for themselves");
     }
 
