@@ -96,10 +96,10 @@ function isHistoryLifecycle(lifecycle: string): boolean {
   return lifecycle === "finished" || lifecycle === "cancelled";
 }
 
-/** Applicant on application-like rows (renamed from volunteer_id). Dual-read for cutover. */
+/** Applicant on application-like rows (DB: applicant_user_id; campaign JSON may still use user_id). */
 function getApplicationApplicantUserId(row: Record<string, unknown> | null | undefined): number {
   if (!row) return 0;
-  return Number(row.applicant_user_id ?? row.volunteer_id ?? 0) || 0;
+  return Number(row.applicant_user_id ?? row.user_id ?? 0) || 0;
 }
 
 function getVolunteerApplicationForUser(impactMetrics: unknown, userId: number) {
@@ -132,7 +132,8 @@ function getCampaignLeadNgoId(
     const fromColumn = Number(obj.lead_ngo_user_id || 0);
     if (fromColumn > 0) return fromColumn;
     if (Object.prototype.hasOwnProperty.call(obj, "impact_metrics")) {
-      return Number(safeJson(obj.impact_metrics).selected_lead_ngo_id || 0);
+      const impact = safeJson(obj.impact_metrics);
+      return Number(obj.lead_ngo_user_id || impact.selected_lead_ngo_id || 0);
     }
   }
 
@@ -291,9 +292,11 @@ export async function listAttendanceAssignments(userId: number) {
 
   const ownedSkill = rows.filter((row) => {
     const table = String(row.application_table || "");
-    // Prefer service_request_applications; keep service_volunteers for old offline rows.
+    // Canonical table after pass-2; accept legacy offline meta that still says service_volunteers.
     const isApplicationTable =
-      table === "service_request_applications" || table === "service_volunteers";
+      table === "service_request_applications" ||
+      table === "service_volunteers" ||
+      !table;
     return (
       Number(row.owner_user_id) === Number(userId) &&
       row.target_type === "service_request" &&
@@ -568,12 +571,8 @@ export async function markAttendance(input: {
       assignment_id: assignment.id,
       target_type: assignment.target_type,
       target_id: assignment.target_id,
-      application_table: assignment.application_table,
-      // Prefer application_id; accept legacy volunteer_assignment_id on old offline rows.
-      application_id:
-        assignment.application_id ??
-        (assignment as Record<string, unknown>).volunteer_assignment_id ??
-        null,
+      application_table: assignment.application_table || "service_request_applications",
+      application_id: assignment.application_id ?? null,
       attendance_date: today,
       attendance_status: status,
       attendance_source: attendanceSource,
