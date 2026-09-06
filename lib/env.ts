@@ -1,7 +1,7 @@
 /**
  * Environment + brand constants — aligned with main GRAM platform naming.
  * PWA talks to the same Supabase schema (users, csr_projects, campaigns,
- * service_engagement_assignments, events, …) and optionally the platform
+ * service_engagement_assignments, field_events, csr_reference_points, …) and optionally the platform
  * API gateway at /api/pwa/*.
  */
 
