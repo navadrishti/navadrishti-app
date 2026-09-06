@@ -6,14 +6,12 @@ interface AuthDebugUser {
   id: number | null;
   email: string;
   userType: string;
-  verified: boolean | null;
   emailVerified: boolean | null;
   phoneVerified: boolean | null;
-  identityVerified: boolean | null;
-  effectiveIdentityVerified?: boolean;
-  effectiveIdentityReason?: string;
   verificationStatus: string;
   accountStatus: string;
+  effectiveIdentityVerified?: boolean;
+  effectiveIdentityReason?: string;
 }
 
 export interface NgoAuthResult {
@@ -86,7 +84,7 @@ export async function authenticateNgoWithPassword(
   const { data: userRow, error: userError } = await supabase
     .from("users")
     .select(
-      "id, name, email, password, user_type, verified, email_verified, phone_verified, identity_verified, verification_status, account_status, device_id, profile_image, profile_data"
+      "id, name, email, password, user_type, email_verified, phone_verified, verification_status, account_status, device_id, profile_image, profile_data"
     )
     .ilike("email", normalizedEmail)
     .maybeSingle();
@@ -104,17 +102,15 @@ export async function authenticateNgoWithPassword(
   }
 
   const userType = normalizeStatus(userRow.user_type);
+  const verificationStatus = normalizeStatus(userRow.verification_status);
 
   debug.user = {
     id: typeof userRow.id === "number" ? userRow.id : null,
     email: typeof userRow.email === "string" ? userRow.email : normalizedEmail,
     userType,
-    verified: typeof userRow.verified === "boolean" ? userRow.verified : null,
     emailVerified: typeof userRow.email_verified === "boolean" ? userRow.email_verified : null,
     phoneVerified: typeof userRow.phone_verified === "boolean" ? userRow.phone_verified : null,
-    identityVerified:
-      typeof userRow.identity_verified === "boolean" ? userRow.identity_verified : null,
-    verificationStatus: normalizeStatus(userRow.verification_status),
+    verificationStatus,
     accountStatus: normalizeStatus(userRow.account_status),
   };
 
@@ -134,46 +130,24 @@ export async function authenticateNgoWithPassword(
   if (!FIELD_APP_ROLES.has(userType)) {
     return {
       allowed: false,
-      reason: "This account cannot access the field app.",
-      debug,
-    };
-  }
-
-  if (!userRow.email_verified) {
-    return {
-      allowed: false,
-      reason: "Email is not verified. Verify your email on the platform, then try again.",
-      debug,
-    };
-  }
-
-  const accountStatus = debug.user.accountStatus;
-  if (accountStatus && ["banned", "suspended", "locked", "deactivated"].includes(accountStatus)) {
-    return {
-      allowed: false,
-      reason: `Account is ${accountStatus}. Contact support if this looks wrong.`,
+      reason: "Only NGO and individual accounts can use the field app.",
       debug,
     };
   }
 
   const displayName =
-    (typeof userRow.name === "string" && userRow.name.trim()) || normalizedEmail;
+    (typeof userRow.name === "string" && userRow.name.trim()) ||
+    (typeof userRow.email === "string" ? userRow.email : normalizedEmail);
   const avatarUrl = resolveUserAvatarUrl({
     profileImage: userRow.profile_image,
     profileData: userRow.profile_data,
   });
 
   if (userType === "ngo") {
-    if (deviceId && userRow.device_id !== deviceId) {
-      // Account-based access: any verified device may sign in. We still record the
-      // latest device_id for audit / admin visibility, but we do not hard-lock hardware.
-      await supabase.from("users").update({ device_id: deviceId }).eq("id", userRow.id);
-    }
-
     debug.stage = "lookup-ngo-verification";
     const { data: ngoVerif, error: ngoVerifError } = await supabase
       .from("ngo_verifications")
-      .select("verification_status, ngo_name")
+      .select("ngo_name, verification_status")
       .eq("user_id", userRow.id)
       .maybeSingle();
 
@@ -191,13 +165,14 @@ export async function authenticateNgoWithPassword(
     }
 
     const identityGatePassed =
-      Boolean(userRow.identity_verified) || debug.ngoVerificationStatus === "verified";
+      verificationStatus === "verified" || debug.ngoVerificationStatus === "verified";
     debug.identityGatePassed = identityGatePassed;
-    debug.identityGateReason = userRow.identity_verified
-      ? "users.identity_verified is true"
-      : debug.ngoVerificationStatus === "verified"
-        ? "ngo_verifications.verification_status is verified"
-        : "No identity verification signal matched";
+    debug.identityGateReason =
+      verificationStatus === "verified"
+        ? "users.verification_status is verified"
+        : debug.ngoVerificationStatus === "verified"
+          ? "ngo_verifications.verification_status is verified"
+          : "No identity verification signal matched";
     if (debug.user) {
       debug.user.effectiveIdentityVerified = identityGatePassed;
       debug.user.effectiveIdentityReason = debug.identityGateReason;
@@ -233,9 +208,7 @@ export async function authenticateNgoWithPassword(
     .maybeSingle();
 
   debug.individualVerificationStatus =
-    normalizeStatus(indVerif?.verification_status) ||
-    normalizeStatus(userRow.verification_status) ||
-    undefined;
+    normalizeStatus(indVerif?.verification_status) || verificationStatus || undefined;
 
   return {
     allowed: true,
