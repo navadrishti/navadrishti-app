@@ -56,10 +56,11 @@ export async function POST(request: NextRequest) {
     const { event_id, event_type, entity_id, data } = body;
 
     const supabase = getServerSupabaseClient();
+    const fieldEventsTable = "field_events";
 
     // 1. Idempotency Check
     const { data: existingEvent } = await supabase
-      .from("events")
+      .from(fieldEventsTable)
       .select("id, payload_hash")
       .eq("event_id", event_id)
       .maybeSingle();
@@ -101,7 +102,7 @@ export async function POST(request: NextRequest) {
 
     // 3. Chain & Hash
     const { data: lastEvent } = await supabase
-      .from("events")
+      .from(fieldEventsTable)
       .select("payload_hash")
       .eq("entity_id", entity_id)
       .order("timestamp", { ascending: false })
@@ -113,7 +114,7 @@ export async function POST(request: NextRequest) {
 
     // 4. Insert to Ledger
     const { data: inserted, error: insertError } = await supabase
-      .from("events")
+      .from(fieldEventsTable)
       .insert({
         event_id,
         event_type,
