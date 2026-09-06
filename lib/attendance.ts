@@ -8,8 +8,8 @@ export type AttendanceKind = "campaign_volunteer" | "skill_service";
 export type AttendanceBucket = "active" | "history";
 
 /** Schema CHECK: active | in_progress | completed | cancelled (+ legacy values when reading). */
-const ACTIVE_ASSIGNMENT_STATUSES = new Set(["active", "in_progress", "assigned", "accepted"]);
-const HISTORY_ASSIGNMENT_STATUSES = new Set(["completed", "cancelled", "rejected", "expired"]);
+const ACTIVE_ASSIGNMENT_STATUSES = new Set(["active", "in_progress"]);
+const HISTORY_ASSIGNMENT_STATUSES = new Set(["completed", "cancelled"]);
 
 export function getSessionFromRequest(request: NextRequest): AppSession | null {
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
@@ -190,8 +190,6 @@ export async function listAttendanceAssignments(userId: number) {
       "in_progress",
       "completed",
       "cancelled",
-      "assigned",
-      "accepted",
     ]);
 
   if (assignmentError) throw assignmentError;
@@ -571,7 +569,9 @@ export async function markAttendance(input: {
       assignment_id: assignment.id,
       target_type: assignment.target_type,
       target_id: assignment.target_id,
-      application_table: assignment.application_table || "service_request_applications",
+      application_table:
+        assignment.application_table ||
+        (assignment.target_type === "campaign" ? "campaigns" : "service_request_applications"),
       application_id: assignment.application_id ?? null,
       attendance_date: today,
       attendance_status: status,
