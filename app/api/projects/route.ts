@@ -29,8 +29,8 @@ export async function GET(request: NextRequest) {
       csr_project_milestones (
         id, project_id, title, description, milestone_order, status, amount, updated_at
       ),
-      reference_points (
-        id, project_id, name, latitude, longitude, updated_at
+      reference_points:csr_reference_points (
+        id, project_id, name, latitude, longitude, radius_meters, updated_at
       )
     `
     )
