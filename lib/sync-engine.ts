@@ -387,8 +387,8 @@ export async function pullProjectData(): Promise<void> {
             name: rp.name,
             latitude: rp.latitude,
             longitude: rp.longitude,
-            radius: 100,
-            updatedAt: new Date().toISOString(),
+            radius: Number(rp.radius_meters ?? rp.radius ?? 100) || 100,
+            updatedAt: rp.updated_at || new Date().toISOString(),
           }));
           await db.referencePoints.bulkPut(refPoints);
         }
