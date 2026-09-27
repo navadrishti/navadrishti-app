@@ -116,53 +116,20 @@ function getVolunteerApplicationForUser(impactMetrics: unknown, userId: number) 
   );
 }
 
-function getCampaignLeadNgoId(
-  impactMetricsOrCampaign: unknown,
-  campaignLeadColumn?: number | null
-): number {
-  const fromArg = Number(campaignLeadColumn || 0);
-  if (fromArg > 0) return fromArg;
-
-  if (
-    impactMetricsOrCampaign &&
-    typeof impactMetricsOrCampaign === "object" &&
-    !Array.isArray(impactMetricsOrCampaign)
-  ) {
-    const obj = impactMetricsOrCampaign as Record<string, any>;
-    const fromColumn = Number(obj.lead_ngo_user_id || 0);
-    if (fromColumn > 0) return fromColumn;
-    if (Object.prototype.hasOwnProperty.call(obj, "impact_metrics")) {
-      const impact = safeJson(obj.impact_metrics);
-      return Number(obj.lead_ngo_user_id || impact.selected_lead_ngo_id || 0);
-    }
-  }
-
-  const impact = safeJson(impactMetricsOrCampaign);
-  return Number(impact.selected_lead_ngo_id || 0);
-}
+type CampaignLeadRef = {
+  lead_ngo_user_id?: number | string | null;
+  impact_metrics?: unknown;
+};
 
 /** Lead NGOs coordinate CSR campaigns; they do not self-mark volunteer attendance. */
-function isCampaignLeadNgo(
-  impactMetricsOrCampaign: unknown,
-  userId: number,
-  campaignLeadColumn?: number | null
-): boolean {
-  const leadNgoId = getCampaignLeadNgoId(impactMetricsOrCampaign, campaignLeadColumn);
+function isCampaignLeadNgo(campaign: CampaignLeadRef | null | undefined, userId: number): boolean {
+  const leadNgoId = Number(campaign?.lead_ngo_user_id || 0);
   return leadNgoId > 0 && leadNgoId === Number(userId);
 }
 
-function isCampaignVolunteerApplicant(
-  impactMetricsOrCampaign: unknown,
-  userId: number
-): boolean {
-  if (isCampaignLeadNgo(impactMetricsOrCampaign, userId)) return false;
-  const impact = Object.prototype.hasOwnProperty.call(
-    (impactMetricsOrCampaign as any) || {},
-    "impact_metrics"
-  )
-    ? (impactMetricsOrCampaign as any).impact_metrics
-    : impactMetricsOrCampaign;
-  return Boolean(getVolunteerApplicationForUser(impact, userId));
+function isCampaignVolunteerApplicant(campaign: CampaignLeadRef, userId: number): boolean {
+  if (isCampaignLeadNgo(campaign, userId)) return false;
+  return Boolean(getVolunteerApplicationForUser(campaign.impact_metrics, userId));
 }
 
 function getNgoNeedFulfillmentMode(request: Record<string, any> | null | undefined): string {
