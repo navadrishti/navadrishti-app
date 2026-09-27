@@ -21,6 +21,9 @@ ios/
 assets/
 scripts/
 
+# Local reference material
+reference/
+
 # next-pwa generated (recreated on `next build`)
 public/sw.js
 public/sw.js.map
