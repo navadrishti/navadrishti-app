@@ -18,12 +18,13 @@ export type LocalRecordStatus = "pending" | "syncing" | "synced" | "failed";
 export type QueueStatus = "pending" | "syncing" | "failed";
 export type SyncQueueKind = "evidence" | "attendance";
 
+/** Matches csr_project_milestones.status as written by the platform. */
 export type MilestoneStatus =
   | "pending"
   | "submitted"
   | "approved"
-  | "payment_initiated"
-  | "paid";
+  | "rejected"
+  | "completed";
 
 export type LocalRecord = {
   id: string;
