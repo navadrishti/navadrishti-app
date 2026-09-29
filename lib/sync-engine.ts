@@ -1,6 +1,8 @@
 import { db } from "@/lib/db";
 import { apiFetch } from "@/lib/env";
 import { randomUUID } from "@/lib/crypto";
+import { isTerminalSyncStatus } from "@/lib/evidence-rules";
+import { getLocalDateStringClient } from "@/lib/utils";
 import type {
   AttendanceAssignmentCache,
   AttendanceOutboxItem,
@@ -35,19 +37,16 @@ export type SyncRunResult = {
   processed: number;
   succeeded: number;
   failed: number;
+  /** The server rejected the session; queued items wait until the user signs in again. */
+  authExpired: boolean;
 };
+
+const AUTH_RETRY_MS = 60 * 1000;
 
 function calculateBackoffMs(attempts: number) {
   const base = Math.min(30000 * 2 ** attempts, 30 * 60 * 1000);
   const jitter = Math.random() * 5000;
   return base + jitter;
-}
-
-function getLocalDateStringClient(reference: Date = new Date()) {
-  const year = reference.getFullYear();
-  const month = String(reference.getMonth() + 1).padStart(2, "0");
-  const day = String(reference.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
 }
 
 async function resolveQueueOwner(item: SyncQueueItem): Promise<string | null> {
@@ -84,7 +83,7 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
   };
 
   const payload = {
-    event_id: randomUUID(),
+    event_id: record.id,
     event_type: "EVIDENCE_SUBMITTED",
     entity_id: record.milestoneId || record.projectId || "unknown",
     data: payloadData,
@@ -104,7 +103,7 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
     body: formData,
   });
 
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     throw new Error("AUTH_EXPIRED: Session expired. Sign in again to sync.");
   }
 
@@ -117,7 +116,8 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
     } catch {
       /* ignore */
     }
-    throw new Error(errorBody.error || `Server returned ${response.status}`);
+    const message = errorBody.error || `Server returned ${response.status}`;
+    throw new Error(isTerminalSyncStatus(response.status) ? `FATAL: ${message}` : message);
   }
 
   const syncedAt = new Date().toISOString();
@@ -134,6 +134,7 @@ async function syncAttendanceToApi(outboxId: string, media: LocalMediaRecord[]) 
 
   const form = new FormData();
   form.append("attendanceStatus", "present");
+  form.append("attendanceDate", item.attendanceDate);
   form.append("locationLatitude", String(item.latitude));
   form.append("locationLongitude", String(item.longitude));
   if (item.accuracy != null) form.append("locationAccuracy", String(item.accuracy));
@@ -149,7 +150,7 @@ async function syncAttendanceToApi(outboxId: string, media: LocalMediaRecord[]) 
     body: form,
   });
 
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     throw new Error("AUTH_EXPIRED: Session expired. Sign in again to sync.");
   }
 
@@ -165,17 +166,15 @@ async function syncAttendanceToApi(outboxId: string, media: LocalMediaRecord[]) 
       });
       return;
     }
-    throw new Error(message);
+    throw new Error(isTerminalSyncStatus(response.status) ? `FATAL: ${message}` : message);
   }
 
+  // The roster cache was already patched when the mark was queued.
   await db.attendanceOutbox.update(outboxId, {
     status: "synced",
     syncedAt: new Date().toISOString(),
     lastError: null,
   });
-
-  // Reflect mark on local cache so UI stays correct offline
-  await patchAttendanceCacheMark(item.userId, item.assignmentId, item.attendanceDate);
 }
 
 async function patchAttendanceCacheMark(
@@ -213,17 +212,21 @@ async function patchAttendanceCacheMark(
 
 async function failQueueItem(item: SyncQueueItem, message: string) {
   const updatedAt = new Date().toISOString();
-  const attempts = item.attempts + 1;
-  const isFatal =
-    message.startsWith("FATAL:") ||
-    message.startsWith("AUTH_EXPIRED:") ||
-    attempts >= MAX_SYNC_ATTEMPTS;
+  const authExpired = message.startsWith("AUTH_EXPIRED:");
+  // An expired session is not the item's fault, so it does not use up an attempt.
+  const attempts = authExpired ? item.attempts : item.attempts + 1;
+  const isFatal = !authExpired && (message.startsWith("FATAL:") || attempts >= MAX_SYNC_ATTEMPTS);
+  const nextAttemptAt = isFatal
+    ? -1
+    : authExpired
+      ? Date.now() + AUTH_RETRY_MS
+      : Date.now() + calculateBackoffMs(item.attempts);
 
   await db.syncQueue.put({
     ...item,
     status: "failed",
     attempts,
-    nextAttemptAt: isFatal ? -1 : Date.now() + calculateBackoffMs(item.attempts),
+    nextAttemptAt,
     lastError: message,
     updatedAt,
   });
@@ -254,16 +257,15 @@ async function failQueueItem(item: SyncQueueItem, message: string) {
  * Uses the session cookie from the same browser login.
  */
 export async function processSyncQueue(sessionUserId: string): Promise<SyncRunResult> {
-  if (!window.navigator.onLine) {
-    return { processed: 0, succeeded: 0, failed: 0 };
-  }
-
-  if (!sessionUserId) {
-    return { processed: 0, succeeded: 0, failed: 0 };
+  if (!window.navigator.onLine || !sessionUserId) {
+    return { processed: 0, succeeded: 0, failed: 0, authExpired: false };
   }
 
   const now = Date.now();
-  const allDue = await db.syncQueue.filter((item) => item.nextAttemptAt <= now).sortBy("nextAttemptAt");
+  // Terminal failures are parked at -1 and only retried when the user asks.
+  const allDue = await db.syncQueue
+    .filter((item) => item.nextAttemptAt >= 0 && item.nextAttemptAt <= now)
+    .sortBy("nextAttemptAt");
 
   const queue: SyncQueueItem[] = [];
   for (const item of allDue) {
@@ -287,6 +289,7 @@ export async function processSyncQueue(sessionUserId: string): Promise<SyncRunRe
 
   let succeeded = 0;
   let failed = 0;
+  let authExpired = false;
 
   if (queue.length > 0) {
     await db.syncLog.add({
@@ -335,6 +338,7 @@ export async function processSyncQueue(sessionUserId: string): Promise<SyncRunRe
       await failQueueItem(item, message);
 
       if (message.startsWith("AUTH_EXPIRED:")) {
+        authExpired = true;
         break;
       }
     }
@@ -344,6 +348,7 @@ export async function processSyncQueue(sessionUserId: string): Promise<SyncRunRe
     processed: queue.length,
     succeeded,
     failed,
+    authExpired,
   };
 }
 

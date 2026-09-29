@@ -8,6 +8,7 @@ import { AttendancePanelSkeleton, CardSectionSkeleton, FieldConsoleSkeleton, Ske
 import { calculateHash } from "@/lib/crypto";
 import { db } from "@/lib/db";
 import { apiFetch } from "@/lib/env";
+import { isLockedMilestoneStatus } from "@/lib/evidence-rules";
 import {
   applyPendingAttendanceOverlay,
   enqueueAttendanceMark,
@@ -80,11 +81,11 @@ function UserWelcomeNav({
 }
 
 export function FieldConsole() {
-  const { session, sessionLoading, isOnline, isSyncing, signOut, syncNow } = useAppContext();
+  const { session, sessionLoading, isOnline, isSyncing, lastSync, signOut, syncNow } = useAppContext();
   const [activeTab, setActiveTab] = useState<"evidence" | "attendance">("evidence");
   const [capturedBlobs, setCapturedBlobs] = useState<{ blob: Blob; url: string; name: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [submitState, setSubmitState] = useState<string | null>(null);
+  const [submitState, setSubmitState] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const [deviceId] = useState(() => getDeviceId());
   const [activePreviewUrl, setActivePreviewUrl] = useState<string | null>(null);
 
@@ -100,6 +101,7 @@ export function FieldConsole() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraLoading, setCameraLoading] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   // Shared Queries (Isolated by Logged-in User)
@@ -117,7 +119,10 @@ export function FieldConsole() {
   const stats = useLiveQuery(async () => {
     if (!session?.id) return { pending: 0, synced: 0, mediaCount: 0 };
     const all = await db.recordsLocal.where("userId").equals(session.id).toArray();
-    const mediaCount = await db.mediaLocal.count(); // Count of all local media
+    const mediaCount = await db.mediaLocal
+      .where("recordId")
+      .anyOf(all.map((record) => record.id))
+      .count();
     return {
       pending: all.filter(r => r.status === "pending" || r.status === "syncing").length,
       synced: all.filter(r => r.status === "synced").length,
@@ -150,15 +155,23 @@ export function FieldConsole() {
 
   const startCamera = async () => {
     setCameraLoading(true);
+    setCameraError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        streamRef.current = stream;
-        setCameraReady(true);
+      if (!videoRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
       }
+      videoRef.current.srcObject = stream;
+      streamRef.current = stream;
+      setCameraReady(true);
     } catch (err) {
-      console.error("Camera error:", err);
+      const denied = err instanceof DOMException && err.name === "NotAllowedError";
+      setCameraError(
+        denied
+          ? "Camera access was blocked. Allow camera access in your browser settings, then try again."
+          : "The camera could not be opened. Close other apps using it and try again."
+      );
     } finally {
       setCameraLoading(false);
     }
@@ -181,6 +194,22 @@ export function FieldConsole() {
   };
 
   useEffect(() => { return () => stopCamera(); }, [stopCamera]);
+
+  useEffect(() => {
+    if (activeTab === "attendance") stopCamera();
+  }, [activeTab, stopCamera]);
+
+  const capturedUrlsRef = useRef<string[]>([]);
+  capturedUrlsRef.current = capturedBlobs.map((item) => item.url);
+  useEffect(() => () => capturedUrlsRef.current.forEach((url) => URL.revokeObjectURL(url)), []);
+
+  const removeCapturedPhoto = (index: number) => {
+    setCapturedBlobs((current) => {
+      const removed = current[index];
+      if (removed) URL.revokeObjectURL(removed.url);
+      return current.filter((_, i) => i !== index);
+    });
+  };
 
   // Main Submit Logic
   async function handleSeal(data: {
@@ -259,11 +288,12 @@ export function FieldConsole() {
         }
       });
 
+      capturedBlobs.forEach((item) => URL.revokeObjectURL(item.url));
       setCapturedBlobs([]);
-      setSubmitState("Evidence saved. Will sync when online.");
+      setSubmitState({ tone: "success", message: "Evidence saved. It will sync when you are online." });
       if (isOnline) await syncNow();
     } catch (error) {
-      setSubmitState(error instanceof Error ? error.message : "Submission failed.");
+      setSubmitState({ tone: "error", message: error instanceof Error ? error.message : "Submission failed." });
     } finally {
       setSubmitting(false);
     }
@@ -297,6 +327,12 @@ export function FieldConsole() {
         isSyncing={isSyncing}
         pendingSyncCount={pendingSyncCount}
       />
+
+      {lastSync?.authExpired ? (
+        <div className="form-error" role="alert" style={{ margin: "0 16px" }}>
+          Your session has expired. Sign out and sign in again to upload the items waiting on this device.
+        </div>
+      ) : null}
 
       {showHubTabs ? (
         <nav className="field-hub-tabs" aria-label="App sections">
@@ -352,9 +388,10 @@ export function FieldConsole() {
             submitting={submitting}
             submitState={submitState}
             capturedBlobs={capturedBlobs}
-            setCapturedBlobs={setCapturedBlobs}
+            onRemovePhoto={removeCapturedPhoto}
             cameraReady={cameraReady}
             cameraLoading={cameraLoading}
+            cameraError={cameraError}
             startCamera={startCamera}
             stopCamera={stopCamera}
             capturePhoto={capturePhoto}
@@ -537,6 +574,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
     String(summary?.last_attendance_at || "") === getLocalDateStringClient();
   const daysPresent = (summary: any) =>
     Number(summary?.days_attended ?? summary?.total_entries ?? 0);
+  const volunteerCount = (item: any) => Math.max(1, Number(item.volunteer_capacity) || 1);
 
   function openCapture(item: any, mode: "selfie" | "photo") {
     if (!item.assignment_id || !item.can_mark) return;
@@ -616,10 +654,11 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                   <div className="attendance-meta">
                     <span>Days attended: {daysPresent(item.attendance_summary)}</span>
                     <span>
-                      Counts as: {item.volunteer_capacity}{" "}
-                      {item.volunteer_capacity === 1 ? "person" : "people"}
+                      Counts as: {volunteerCount(item)} {volunteerCount(item) === 1 ? "person" : "people"}
                     </span>
-                    <span>Status: {String(item.lifecycle || "").replaceAll("_", " ")}</span>
+                    {item.lifecycle ? (
+                      <span>Status: {String(item.lifecycle).replaceAll("_", " ")}</span>
+                    ) : null}
                     {item.start_date || item.end_date ? (
                       <span>
                         {item.start_date || "—"} → {item.end_date || "—"}
@@ -636,8 +675,8 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                     >
                       {marked
                         ? "Today already marked"
-                        : item.lifecycle === "yet_to_start"
-                          ? "Opens when campaign starts"
+                        : !item.can_mark
+                          ? item.mark_blocked_reason || "Attendance is not open"
                           : "Take selfie & mark"}
                     </button>
                   ) : null}
@@ -696,7 +735,11 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                         disabled={!item.can_mark || marked}
                         onClick={() => openCapture(item, "photo")}
                       >
-                        {marked ? "Today already marked" : "Capture photo & mark"}
+                        {marked
+                          ? "Today already marked"
+                          : !item.can_mark
+                            ? item.mark_blocked_reason || "Attendance is not open"
+                            : "Capture photo & mark"}
                       </button>
                     ) : null}
                   </article>
@@ -781,13 +824,20 @@ function AttendanceCaptureSheet(props: {
         video: { facingMode: isSelfie ? "user" : "environment" },
         audio: false,
       });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        streamRef.current = stream;
-        setCameraReady(true);
+      if (!videoRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
       }
+      videoRef.current.srcObject = stream;
+      streamRef.current = stream;
+      setCameraReady(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not open camera");
+      const denied = err instanceof DOMException && err.name === "NotAllowedError";
+      setError(
+        denied
+          ? "Camera access was blocked. Allow camera access in your browser settings, then try again."
+          : "The camera could not be opened. Close other apps using it and try again."
+      );
     } finally {
       setCameraLoading(false);
     }
@@ -910,7 +960,7 @@ function AttendanceCaptureSheet(props: {
         })),
       });
 
-      const capacity = Number(props.item.volunteer_capacity || 1);
+      const capacity = Math.max(1, Number(props.item.volunteer_capacity) || 1);
       const count = photos.length;
       stopCamera();
 
@@ -927,7 +977,7 @@ function AttendanceCaptureSheet(props: {
           ? capacity > 1
             ? `Present sealed with ${count} selfie(s) (counts as ${capacity} people).${offlineNote}`
             : `Present sealed with ${count} selfie(s).${offlineNote}`
-          : `Marked ${props.item.subtitle} present with ${count} sealed photo(s).${offlineNote}`
+          : `Marked ${props.item.subtitle || "the assignee"} present with ${count} sealed photo(s).${offlineNote}`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not mark attendance");
@@ -1043,7 +1093,7 @@ function NgoCaptureView(props: any) {
   const milestones = useLiveQuery(() => db.milestones.orderBy("milestoneOrder").toArray(), [], []);
   const activeMilestone = useMemo(() => {
     if (!milestones || milestones.length === 0) return null;
-    return milestones.find((m) => m.status !== "paid") || milestones[0];
+    return milestones.find((m) => !isLockedMilestoneStatus(m.status)) || milestones[milestones.length - 1];
   }, [milestones]);
 
   if (milestones === undefined || (isSyncing && milestones.length === 0)) {
@@ -1061,14 +1111,24 @@ function NgoCaptureView(props: any) {
     );
   }
 
-  const isLocked = activeMilestone.status !== "pending";
+  const isLocked = isLockedMilestoneStatus(activeMilestone.status);
+  const statusNote = isLocked
+    ? "Every milestone is approved. There is nothing left to capture."
+    : activeMilestone.status === "submitted"
+      ? "Evidence is with the reviewer. You can still add more."
+      : activeMilestone.status === "rejected"
+        ? "The reviewer asked for new evidence. Capture it again below."
+        : null;
 
   return (
     <>
       <section className="card-section">
         <span className="section-title">CSR Milestone</span>
         <div style={{ fontWeight: 800, fontSize: '1.1rem' }}>{activeMilestone.title}</div>
-        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{activeMilestone.description}</p>
+        {activeMilestone.description ? (
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{activeMilestone.description}</p>
+        ) : null}
+        {statusNote && <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>{statusNote}</p>}
       </section>
 
       <CameraCard {...props} contextLabel={activeMilestone.title} />
@@ -1093,7 +1153,11 @@ function NgoCaptureView(props: any) {
               <textarea value={notes} onChange={e => setNotes(e.target.value)} required rows={3} />
             </div>
           </fieldset>
-          {props.submitState && <div className="form-success">{props.submitState}</div>}
+          {props.submitState ? (
+            <div className={props.submitState.tone === "error" ? "form-error" : "form-success"}>
+              {props.submitState.message}
+            </div>
+          ) : null}
           {!isLocked && <button type="submit" className="btn-primary" disabled={props.submitting || props.capturedBlobs.length === 0}>Submit Evidence</button>}
         </form>
       </section>
@@ -1125,6 +1189,8 @@ function CameraCard(props: any) {
           <canvas ref={props.canvasRef} hidden />
         </div>
 
+      {props.cameraError ? <div className="form-error" style={{ marginBottom: '12px' }}>{props.cameraError}</div> : null}
+
       <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
          <button className="btn-outline" onClick={props.cameraReady ? props.stopCamera : props.startCamera} style={{ flex: 1 }}>{props.cameraReady ? "Stop Feed" : "Open Camera"}</button>
          <button className="btn-shutter" onClick={() => props.capturePhoto(props.contextLabel)} disabled={!props.cameraReady || props.capturedBlobs.length >= 5}><div className="btn-shutter-inner" /></button>
@@ -1132,14 +1198,14 @@ function CameraCard(props: any) {
       </div>
       <div className="chips-row" style={{ marginTop: '20px' }}>
         {props.capturedBlobs.map((item: any, idx: number) => (
-          <div key={idx} style={{ position: 'relative' }}>
+          <div key={item.url} style={{ position: 'relative' }}>
             <img 
               src={item.url} 
               style={{ width: '50px', height: '50px', borderRadius: '10px', objectFit: 'cover', cursor: 'pointer' }} 
               alt="cap" 
               onClick={() => props.onPreviewImage(item.url)}
             />
-            <button onClick={() => props.setCapturedBlobs((p: any) => p.filter((_: any, i: any) => i !== idx))} style={{ position: 'absolute', top: -5, right: -5, background: 'var(--error)', color: '#fff', borderRadius: '50%', width: '18px', height: '18px', fontSize: '10px', border: '2px solid #fff' }}>×</button>
+            <button type="button" aria-label="Remove photo" onClick={() => props.onRemovePhoto(idx)} style={{ position: 'absolute', top: -5, right: -5, background: 'var(--error)', color: '#fff', borderRadius: '50%', width: '18px', height: '18px', fontSize: '10px', border: '2px solid #fff' }}>×</button>
           </div>
         ))}
       </div>
