@@ -60,7 +60,6 @@ async function clearAllLocalData() {
         await db.attendanceOutbox.clear();
       }
     );
-    console.log("[AppProvider] Full local data wipe complete (user switch).");
   } catch (err) {
     console.error("[AppProvider] Failed to clear local data:", err);
   }
@@ -79,7 +78,6 @@ async function clearSharedCacheData() {
       await db.referencePoints.clear();
       await db.attendanceCache.clear();
     });
-    console.log("[AppProvider] Shared cache cleared (sign-out). Pending uploads preserved.");
   } catch (err) {
     console.error("[AppProvider] Failed to clear shared cache:", err);
   }
