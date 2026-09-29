@@ -27,6 +27,9 @@
     "css-loader": "^7.1.4",
     "style-loader": "^4.0.0",
     "typescript": "5.9.3",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.2"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.1.2"
   }
 }
