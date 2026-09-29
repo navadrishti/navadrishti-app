@@ -32,7 +32,7 @@ export default function HomePage() {
       if (!res.ok) throw new Error(data.error || "Login failed");
 
       if (data.session) {
-        applySession(data.session as AppSession);
+        await applySession(data.session as AppSession);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Invalid credentials");

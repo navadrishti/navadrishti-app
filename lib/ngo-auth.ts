@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import { resolveUserAvatarUrl } from "@/lib/utils";
 import { getServerSupabaseClient } from "@/lib/supabase-server";
+import { getAccountAccessBlockReason } from "@/lib/account-access";
 
 interface AuthDebugUser {
   id: number | null;
@@ -54,17 +55,13 @@ function detectPasswordFormat(storedPassword: string) {
   return "plain";
 }
 
+// The platform only stores bcrypt hashes; anything else must not authenticate.
 async function comparePassword(inputPassword: string, storedPassword: string) {
   const passwordFormat = detectPasswordFormat(storedPassword);
-  if (passwordFormat === "bcrypt") {
-    return {
-      passwordFormat,
-      passwordMatched: await bcrypt.compare(inputPassword, storedPassword),
-    };
-  }
   return {
     passwordFormat,
-    passwordMatched: storedPassword === inputPassword,
+    passwordMatched:
+      passwordFormat === "bcrypt" && (await bcrypt.compare(inputPassword, storedPassword)),
   };
 }
 
@@ -84,7 +81,7 @@ export async function authenticateNgoWithPassword(
   const { data: userRow, error: userError } = await supabase
     .from("users")
     .select(
-      "id, name, email, password, user_type, email_verified, phone_verified, verification_status, account_status, device_id, profile_image, profile_data"
+      "id, name, email, password, user_type, email_verified, phone_verified, verification_status, account_status, locked_until, device_id, profile_image, profile_data"
     )
     .ilike("email", normalizedEmail)
     .maybeSingle();
@@ -94,9 +91,7 @@ export async function authenticateNgoWithPassword(
   if (userError || !userRow) {
     return {
       allowed: false,
-      reason: userError
-        ? `Unable to load platform user record: ${userError.message}`
-        : "Invalid email or password.",
+      reason: userError ? "Sign-in is temporarily unavailable. Try again shortly." : "Invalid email or password.",
       debug,
     };
   }
@@ -125,6 +120,11 @@ export async function authenticateNgoWithPassword(
       reason: "Invalid email or password.",
       debug,
     };
+  }
+
+  const blockReason = getAccountAccessBlockReason(userRow);
+  if (blockReason) {
+    return { allowed: false, reason: blockReason, debug: { ...debug, stage: "account-blocked" } };
   }
 
   if (!FIELD_APP_ROLES.has(userType)) {
@@ -158,7 +158,7 @@ export async function authenticateNgoWithPassword(
       return {
         allowed: false,
         reason: ngoVerifError
-          ? `Unable to load verification record: ${ngoVerifError.message}`
+          ? "Sign-in is temporarily unavailable. Try again shortly."
           : "Verification record not found. Complete your profile on the platform.",
         debug,
       };

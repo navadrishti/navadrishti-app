@@ -1,11 +1,40 @@
 import type { NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME, verifySessionToken, type AppSession } from "@/lib/session";
 import { getServerSupabaseClient } from "@/lib/supabase-server";
+import { findAccountBlockReason } from "@/lib/account-access";
 
 export const CAMPAIGN_VOLUNTEER_ENGAGEMENT_KIND = "campaign_volunteer";
 
 export type AttendanceKind = "campaign_volunteer" | "skill_service";
 export type AttendanceBucket = "active" | "history";
+
+export class AttendanceError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "AttendanceError";
+  }
+}
+
+export function attendanceErrorStatus(error: unknown): number {
+  if (error instanceof AttendanceError) return error.status;
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("already been marked") || message.includes("cannot be edited")) return 409;
+  if (
+    message.includes("Location is required") ||
+    message.includes("1 to 3") ||
+    message.includes("integrity")
+  ) {
+    return 400;
+  }
+  return 500;
+}
+
+/** Offline marks sync late, so the device's date is trusted within this window of the server's. */
+const ATTENDANCE_BACKDATE_DAYS = 7;
+
+function isUniqueViolation(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { code?: string }).code === "23505");
+}
 
 /** Schema CHECK: active | in_progress | completed | cancelled (+ legacy values when reading). */
 const ACTIVE_ASSIGNMENT_STATUSES = new Set(["active", "in_progress"]);
@@ -65,25 +94,40 @@ export function resolveCampaignIdFromAssignment(assignment: {
   return String(meta.campaign_id || assignment.target_id || "");
 }
 
-function isCampaignStarted(startDate: string | null | undefined): boolean {
-  if (!startDate) return true;
-  const start = new Date(String(startDate).slice(0, 10) + "T00:00:00");
-  if (Number.isNaN(start.getTime())) return true;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return start.getTime() <= today.getTime();
+function shiftDate(date: string, days: number): string {
+  const shifted = new Date(`${date}T00:00:00Z`);
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return shifted.toISOString().slice(0, 10);
+}
+
+/**
+ * The device records the day the mark was taken. The server's clock may be a timezone behind,
+ * so one day ahead is allowed, and queued marks may arrive up to a week late.
+ */
+export function resolveAttendanceDate(deviceDate: string | null | undefined, reference: Date = new Date()): string {
+  const serverToday = getLocalDateString(reference);
+  if (!deviceDate) return serverToday;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(deviceDate) || Number.isNaN(Date.parse(`${deviceDate}T00:00:00Z`))) {
+    throw new AttendanceError("Attendance date is invalid", 400);
+  }
+  if (deviceDate > shiftDate(serverToday, 1) || deviceDate < shiftDate(serverToday, -ATTENDANCE_BACKDATE_DAYS)) {
+    throw new AttendanceError("This attendance mark is too old to sync. Mark attendance again today.", 422);
+  }
+  return deviceDate;
 }
 
 function getCampaignLifecycle(input: {
   startDate?: string | null;
   endDate?: string | null;
   campaignStatus?: string | null;
+  onDate?: string;
 }): "yet_to_start" | "started" | "finished" | "cancelled" {
   const status = String(input.campaignStatus || "").toLowerCase();
   if (status === "cancelled" || status === "rejected") return "cancelled";
-  if (status === "completed" || status === "finished") return "finished";
+  if (status === "completed" || status === "finished" || status === "closed") return "finished";
+  if (status === "draft") return "yet_to_start";
 
-  const today = getLocalDateString();
+  const today = input.onDate || getLocalDateString();
   const start = input.startDate ? String(input.startDate).slice(0, 10) : null;
   const end = input.endDate ? String(input.endDate).slice(0, 10) : null;
 
@@ -208,7 +252,7 @@ export async function listAttendanceAssignments(userId: number) {
     if (!assignment && !isHistoryLifecycle(lifecycle)) {
       const ownerUserId = Number(campaign.company_id || 0) || userId;
       const capacity = toNumber(application.capacity, 1) || 1;
-      const { data: created } = await supabase
+      const { data: created, error: createError } = await supabase
         .from("service_engagement_assignments")
         .insert({
           target_type: "campaign",
@@ -231,11 +275,34 @@ export async function listAttendanceAssignments(userId: number) {
         })
         .select("*")
         .single();
-      assignment = created || undefined;
+      if (isUniqueViolation(createError)) {
+        // Another request (a second tab or device) created it first.
+        const { data: existing } = await supabase
+          .from("service_engagement_assignments")
+          .select("*")
+          .eq("target_type", "campaign")
+          .eq("target_id", String(campaign.id))
+          .eq("assignee_user_id", userId)
+          .maybeSingle();
+        assignment = existing || undefined;
+      } else {
+        assignment = created || undefined;
+      }
     }
 
     const meta = safeJson(assignment?.meta);
     const company = companiesById.get(Number(campaign.company_id || 0));
+    const assignmentActive = ACTIVE_ASSIGNMENT_STATUSES.has(String(assignment?.status || "").toLowerCase());
+    const markBlockedReason =
+      lifecycle === "yet_to_start"
+        ? "Opens when the campaign starts"
+        : lifecycle !== "started"
+          ? "Campaign has ended"
+          : !assignment?.id
+            ? "Attendance is not set up yet. Refresh in a moment."
+            : !assignmentActive
+              ? "Your volunteer assignment is no longer active"
+              : null;
 
     bucket.campaignItems.push({
       kind: "campaign_volunteer" as const,
@@ -249,7 +316,8 @@ export async function listAttendanceAssignments(userId: number) {
       end_date: campaign.end_date || null,
       volunteer_capacity: toNumber(application.capacity || meta.volunteer_capacity, 1) || 1,
       attendance_summary: meta.attendance_summary || {},
-      can_mark: lifecycle === "started" && Boolean(assignment?.id),
+      can_mark: markBlockedReason === null,
+      mark_blocked_reason: markBlockedReason,
       mark_mode: "self_location" as const,
       bucket: isHistoryLifecycle(lifecycle) ? ("history" as const) : ("active" as const),
     });
@@ -325,6 +393,7 @@ export async function listAttendanceAssignments(userId: number) {
       daily_rate: dailyRate,
       attendance_summary: meta.attendance_summary || {},
       can_mark: canMark,
+      mark_blocked_reason: canMark ? null : "This assignment is no longer active",
       mark_mode: "ngo_mark" as const,
       assignee_user_id: Number(assignment.assignee_user_id || 0) || null,
       bucket: isHistory ? ("history" as const) : ("active" as const),
@@ -348,6 +417,7 @@ export async function markAttendance(input: {
   locationLongitude?: number | null;
   locationAccuracy?: number | null;
   units?: number | null;
+  attendanceDate?: string | null;
   photos?: Array<{
     buffer: Buffer;
     fileName: string;
@@ -358,15 +428,18 @@ export async function markAttendance(input: {
 }) {
   const supabase = getServerSupabaseClient();
   const userId = Number(input.session.ngoId || input.session.id);
-  const today = getLocalDateString();
+  const today = resolveAttendanceDate(input.attendanceDate);
 
   const photos = input.photos || [];
   if (photos.length < 1 || photos.length > 3) {
-    throw new Error("Attendance requires 1 to 3 sealed photos");
+    throw new AttendanceError("Attendance requires 1 to 3 sealed photos", 400);
   }
   if (input.locationLatitude == null || input.locationLongitude == null) {
-    throw new Error("Location is required to mark attendance");
+    throw new AttendanceError("Location is required to mark attendance", 400);
   }
+
+  const blockReason = await findAccountBlockReason(userId);
+  if (blockReason) throw new AttendanceError(blockReason, 403);
 
   const { data: assignment, error } = await supabase
     .from("service_engagement_assignments")
@@ -375,15 +448,16 @@ export async function markAttendance(input: {
     .maybeSingle();
 
   if (error || !assignment) {
-    throw new Error("Assignment not found");
+    throw new AttendanceError("Assignment not found", 404);
   }
 
   const isCampaign = isCampaignVolunteerAssignment(assignment);
   const isOwner = Number(assignment.owner_user_id) === userId;
   const isAssignee = Number(assignment.assignee_user_id) === userId;
+  let campaignApplication: Record<string, any> | null = null;
 
   if (isCampaign) {
-    if (!isAssignee) throw new Error("Only the assigned campaign volunteer can mark attendance");
+    if (!isAssignee) throw new AttendanceError("Only the assigned campaign volunteer can mark attendance", 403);
 
     const campaignId = resolveCampaignIdFromAssignment(assignment);
     const { data: campaign } = await supabase
@@ -393,28 +467,34 @@ export async function markAttendance(input: {
       .maybeSingle();
 
     if (isCampaignLeadNgo(campaign, userId)) {
-      throw new Error("Lead NGOs do not mark volunteer attendance for themselves");
+      throw new AttendanceError("Lead NGOs do not mark volunteer attendance for themselves", 403);
+    }
+
+    if (!ACTIVE_ASSIGNMENT_STATUSES.has(String(assignment.status || "").toLowerCase())) {
+      throw new AttendanceError("This campaign assignment is closed", 422);
     }
 
     const lifecycle = getCampaignLifecycle({
       startDate: campaign?.start_date as string | null,
       endDate: campaign?.end_date as string | null,
       campaignStatus: campaign?.status as string | null,
+      onDate: today,
     });
-    if (lifecycle === "yet_to_start" || !isCampaignStarted(campaign?.start_date as string | null)) {
-      throw new Error("Attendance opens when the campaign starts");
+    if (lifecycle === "yet_to_start") {
+      throw new AttendanceError("Attendance opens when the campaign starts", 422);
     }
     if (lifecycle === "finished" || lifecycle === "cancelled") {
-      throw new Error("This campaign is no longer active for attendance");
+      throw new AttendanceError("This campaign is no longer active for attendance", 422);
     }
+    campaignApplication = getVolunteerApplicationForUser(campaign?.impact_metrics, userId);
   } else if (assignment.target_type === "service_request") {
-    if (!isOwner) throw new Error("Only the assignment owner can mark daily attendance");
+    if (!isOwner) throw new AttendanceError("Only the assignment owner can mark daily attendance", 403);
     const status = String(assignment.status || "").toLowerCase();
     if (!ACTIVE_ASSIGNMENT_STATUSES.has(status)) {
-      throw new Error("This assignment is closed");
+      throw new AttendanceError("This assignment is closed", 422);
     }
   } else {
-    throw new Error("This assignment type cannot be marked from the field app");
+    throw new AttendanceError("This assignment type cannot be marked from the field app", 422);
   }
 
   const { data: existing } = await supabase
@@ -425,7 +505,7 @@ export async function markAttendance(input: {
     .maybeSingle();
 
   if (existing) {
-    throw new Error("Attendance for today has already been marked and cannot be edited");
+    throw new AttendanceError("Attendance for today has already been marked and cannot be edited", 409);
   }
 
   // Verify photo integrity hashes before upload
@@ -433,7 +513,7 @@ export async function markAttendance(input: {
   for (const photo of photos) {
     const actual = crypto.createHash("sha256").update(photo.buffer).digest("hex");
     if (actual !== String(photo.proofHash || "").toLowerCase()) {
-      throw new Error("Photo integrity check failed. Recapture and try again.");
+      throw new AttendanceError("Photo integrity check failed. Recapture and try again.", 400);
     }
   }
 
@@ -441,7 +521,7 @@ export async function markAttendance(input: {
     "@/lib/cloudinary"
   );
   if (!hasCloudinaryEnv()) {
-    throw new Error("Photo storage is not configured");
+    throw new AttendanceError("Photo storage is not configured", 500);
   }
 
   const folder = `navadrishti/attendance/${sanitizeCloudinarySegment(String(assignment.id))}/${today}`;
@@ -481,27 +561,15 @@ export async function markAttendance(input: {
     )
     .digest("hex");
 
-  const { data: actingUser } = await supabase
-    .from("users")
-    .select("id, ngo_volunteer_capacity, profile_data, user_type")
-    .eq("id", userId)
-    .maybeSingle();
-
-  const profile = safeJson(actingUser?.profile_data);
-  const ngoCapacity =
-    toNumber(
-      actingUser?.ngo_volunteer_capacity ??
-        profile.ngo_volunteer_capacity ??
-        profile.team_strength,
-      0
-    ) || 0;
-
-  const units =
-    input.units != null && input.units > 0
-      ? input.units
-      : isCampaign && String(actingUser?.user_type || input.session.role) === "ngo"
-        ? Math.max(1, ngoCapacity || toNumber(safeJson(assignment.meta).volunteer_capacity, 1) || 1)
-        : 1;
+  // A volunteering NGO counts as the headcount it committed in its application, not its whole team.
+  const campaignUnitCap = Math.max(
+    1,
+    toNumber(campaignApplication?.capacity ?? safeJson(assignment.meta).volunteer_capacity, 1) || 1
+  );
+  const requestedUnits = input.units != null && input.units > 0 ? input.units : null;
+  const units = isCampaign
+    ? Math.min(requestedUnits ?? campaignUnitCap, campaignUnitCap)
+    : requestedUnits ?? 1;
 
   const ratePerUnit = toNumber(assignment.rate_per_unit ?? safeJson(assignment.meta).rate_per_unit, 0);
   const status =
@@ -549,12 +617,15 @@ export async function markAttendance(input: {
       multiplier: 1,
       rate_per_unit: ratePerUnit || null,
       amount_due: amountDue,
-      payment_status: "pending",
+      payment_status: amountDue > 0 ? "pending" : "waived",
       meta,
     })
     .select("*")
     .single();
 
+  if (isUniqueViolation(insertError)) {
+    throw new AttendanceError("Attendance for today has already been marked and cannot be edited", 409);
+  }
   if (insertError) throw insertError;
 
   const { data: entries } = await supabase
@@ -571,18 +642,25 @@ export async function markAttendance(input: {
 
   const summary = {
     total_entries: list.length,
-    days_attended: list.length,
+    days_attended: list.filter((entry) => String(entry.attendance_status || "").toLowerCase() === "present").length,
     total_due: totalDue,
     paid_total: paidTotal,
     payment_progress: totalDue > 0 ? Math.round((paidTotal / totalDue) * 100) : 0,
     last_attendance_at: list.length ? list[0].attendance_date : null,
   };
 
+  // Re-read meta: the photo uploads above can take seconds and the platform may have changed it meanwhile.
+  const { data: latest } = await supabase
+    .from("service_engagement_assignments")
+    .select("meta")
+    .eq("id", assignment.id)
+    .maybeSingle();
+
   await supabase
     .from("service_engagement_assignments")
     .update({
       meta: {
-        ...safeJson(assignment.meta),
+        ...safeJson(latest?.meta ?? assignment.meta),
         attendance_summary: summary,
       },
       updated_at: new Date().toISOString(),

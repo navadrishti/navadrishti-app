@@ -10,6 +10,17 @@ const withPWA = withPWAInit({
   // Keep SW off in `next dev`; enable it for production / Vercel builds.
   disable: process.env.NODE_ENV === "development",
   cacheOnFrontEndNav: true,
+  extendDefaultRuntimeCaching: true,
+  workboxOptions: {
+    // API responses are per-user; offline data lives in IndexedDB, never in the SW cache.
+    runtimeCaching: [
+      {
+        urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith("/api/"),
+        handler: "NetworkOnly",
+        method: "GET",
+      },
+    ],
+  },
   fallbacks: {
     document: "/offline"
   }

@@ -60,18 +60,11 @@ export async function POST(request: NextRequest) {
 
   const authResult = await authenticateNgoWithPassword(email, password, deviceId);
 
-  console.log(`[LOGIN_DEBUG] Email: ${email}, Allowed: ${authResult.allowed}, Reason: ${authResult.reason}`);
-  if (!authResult.allowed) console.dir(authResult.debug, { depth: null });
-
   if (!authResult.allowed || !authResult.ngoId || !authResult.ngoName || !authResult.email) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: authResult.reason,
-        debug: authResult.debug,
-      },
-      { status: 401 },
-    );
+    if (authResult.debug.userLookupError || authResult.debug.ngoVerificationLookupError) {
+      console.error("[api/login] lookup failed at stage", authResult.debug.stage);
+    }
+    return NextResponse.json({ ok: false, error: authResult.reason }, { status: 401 });
   }
 
   const maxAge = getSessionCookieMaxAgeSeconds();
@@ -102,7 +95,6 @@ export async function POST(request: NextRequest) {
       createdAt: new Date().toISOString(),
       avatarUrl: authResult.avatarUrl ?? null,
     },
-    debug: authResult.debug,
   });
 
   response.cookies.set({

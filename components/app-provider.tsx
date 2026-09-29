@@ -3,18 +3,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { processSyncQueue, pullProjectData, logStep, logStepError, type SyncRunResult } from "@/lib/sync-engine";
 import { apiFetch, FIELD_APP_NAME } from "@/lib/env";
-import { resolveUserAvatarUrl } from "@/lib/utils";
 import { getSupabaseClient } from "@/lib/supabase-browser";
 import { db } from "@/lib/db";
-import type { AppSession, SessionRole } from "@/lib/types";
+import type { AppSession } from "@/lib/types";
 import { ProductBrand } from "@/components/product-brand";
-
-type SignInInput = {
-  name: string;
-  email: string;
-  password: string;
-  role: SessionRole;
-};
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -30,9 +22,8 @@ type AppContextValue = {
   isOnline: boolean;
   isSyncing: boolean;
   lastSync: SyncRunResult | null;
-  signIn: (input: SignInInput) => Promise<void>;
-  applySession: (session: AppSession) => void;
-  signOut: () => void;
+  applySession: (session: AppSession) => Promise<void>;
+  signOut: () => Promise<void>;
   syncNow: () => Promise<void>;
 };
 
@@ -158,7 +149,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       if (session.role === "ngo") {
         logStep("syncNow: Calling pullProjectData");
-        await pullProjectData();
+        // Uploads must not wait on a failed project refresh.
+        await pullProjectData().catch((err: unknown) => {
+          logStepError(`syncNow: Project refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
       }
 
       // Process uploads in queue for THIS signed-in user only (evidence + attendance)
@@ -231,98 +225,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, [ready, session?.id]);
 
-  const signIn = useCallback(async ({ email, password, role }: SignInInput) => {
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      throw new Error("Supabase client is not initialized. check your .env.local file.");
-    }
-
-    // 1. Authenticate with Supabase
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email: email.trim().toLowerCase(),
-      password: password.trim(),
-    });
-
-    if (authError) throw authError;
-    const userEmail = authData.user?.email;
-    if (!userEmail) throw new Error("Authentication failed: No user email returned.");
-
-    interface UserProfile {
-      id: number;
-      name: string;
-      user_type: string;
-      email_verified: boolean;
-      phone_verified: boolean;
-      verification_status: string;
-      profile_data?: unknown;
-      profile_image?: string | null;
-    }
-
-    // 2. Fetch User Profile and Verification status
-    const { data: profileData, error: profileError } = await supabase
-      .from("users")
-      .select(
-        "id, name, user_type, email_verified, phone_verified, verification_status, profile_image, profile_data",
-      )
-      .eq("email", userEmail)
-      .single();
-
-    if (profileError || !profileData) {
-      await supabase.auth.signOut();
-      throw new Error("Could not fetch your profile from the database.");
-    }
-
-    const profile = profileData as unknown as UserProfile;
-
-    // 3. Verification Guard
-    const isEmailVerified = profile.email_verified === true;
-    const isDocsVerified = profile.verification_status === "verified";
-    const userType = String(profile.user_type || "").toLowerCase();
-
-    if (!isEmailVerified) {
-      await supabase.auth.signOut();
-      throw new Error("Email is not verified. Verify your email on the platform, then try again.");
-    }
-
-    if (userType === "ngo" && !isDocsVerified) {
-      await supabase.auth.signOut();
-      throw new Error("Verification is incomplete. Fully verified accounts can access the field app.");
-    }
-
-    // 4. Role Guard — NGO evidence / individual attendance only
-    if (userType !== "ngo" && userType !== "individual") {
-      await supabase.auth.signOut();
-      throw new Error("This account cannot access the field app.");
-    }
-
-    const nextSession: AppSession = {
-      id: profile.id.toString(),
-      name: profile.name,
-      ngoId: profile.id,
-      ngoName: profile.name,
-      email: authData.user.email!,
-      role: userType as SessionRole,
-      issuedAt: Date.now(),
-      expiresAt: Date.now() + 60 * 60 * 24 * 7 * 1000,
-      createdAt: new Date().toISOString(),
-      avatarUrl: resolveUserAvatarUrl({
-        profileImage: profile.profile_image,
-        profileData: profile.profile_data,
-      }),
-    };
-
-    // Full wipe only when a DIFFERENT user signs in
+  const applySession = useCallback(async (nextSession: AppSession) => {
     const lastUserId = window.localStorage.getItem(LAST_USER_KEY);
-    if (lastUserId && lastUserId !== profile.id.toString()) {
-      console.log("[AppProvider] User switch detected. Clearing all local data.");
+    if (lastUserId && lastUserId !== nextSession.id) {
       await clearAllLocalData();
     }
-    window.localStorage.setItem(LAST_USER_KEY, profile.id.toString());
-    window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
-    setSession(nextSession);
-  }, []);
-
-  const applySession = useCallback((nextSession: AppSession) => {
     window.localStorage.setItem(LAST_USER_KEY, nextSession.id);
     window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
     setSession(nextSession);
@@ -330,9 +237,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = useCallback(async () => {
     const supabase = getSupabaseClient();
-    if (supabase) {
-      await supabase.auth.signOut();
-    }
+    await Promise.allSettled([
+      apiFetch("/api/logout", { method: "POST" }),
+      supabase ? supabase.auth.signOut() : Promise.resolve(),
+    ]);
     // Only clear shared/cached data — preserve user's own pending records
     await clearSharedCacheData();
     window.localStorage.removeItem(SESSION_KEY);
@@ -350,12 +258,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       isOnline,
       isSyncing,
       lastSync,
-      signIn,
       applySession,
       signOut,
       syncNow
     }),
-    [configured, isOnline, isSyncing, lastSync, missingEnv, ready, session, signIn, applySession, signOut, syncNow]
+    [configured, isOnline, isSyncing, lastSync, missingEnv, ready, session, applySession, signOut, syncNow]
   );
 
   return (

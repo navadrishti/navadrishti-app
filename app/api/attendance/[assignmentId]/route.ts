@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionFromRequest, markAttendance } from "@/lib/attendance";
+import { attendanceErrorStatus, getSessionFromRequest, markAttendance } from "@/lib/attendance";
 import { hasServerEnv } from "@/lib/env";
 
 export const runtime = "nodejs";
@@ -51,6 +51,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const locationAccuracy =
       form.get("locationAccuracy") != null ? Number(form.get("locationAccuracy")) : null;
     const units = form.get("units") != null ? Number(form.get("units")) : null;
+    const attendanceDate =
+      typeof form.get("attendanceDate") === "string" ? String(form.get("attendanceDate")) : null;
 
     let proofMeta: Array<{ proofHash?: string; capturedAt?: string }> = [];
     const proofRaw = form.get("photoProofs");
@@ -100,25 +102,21 @@ export async function POST(request: NextRequest, context: RouteContext) {
       locationLongitude: Number.isFinite(locationLongitude as number) ? locationLongitude : null,
       locationAccuracy: Number.isFinite(locationAccuracy as number) ? locationAccuracy : null,
       units: Number.isFinite(units as number) ? units : null,
+      attendanceDate,
       photos,
     });
 
     return NextResponse.json({ ok: true, data: result }, { status: 201 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to mark attendance";
-    const status =
-      message.includes("already been marked") || message.includes("cannot be edited")
-        ? 409
-        : message.includes("Location is required") ||
-            message.includes("opens when") ||
-            message.includes("1 to 3") ||
-            message.includes("integrity")
-          ? 400
-          : message.includes("Only the")
-            ? 403
-            : 500;
+    const status = attendanceErrorStatus(error);
+    const message =
+      status === 500
+        ? "Attendance could not be saved. It will retry automatically."
+        : error instanceof Error
+          ? error.message
+          : "Failed to mark attendance";
 
-    console.error("[api/attendance/mark]", error);
+    if (status === 500) console.error("[api/attendance/mark]", error);
     return NextResponse.json({ ok: false, error: message }, { status });
   }
 }
