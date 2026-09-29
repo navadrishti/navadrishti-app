@@ -17,7 +17,6 @@ export function logStep(msg: string) {
     w.syncSteps.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
     if (w.onSyncStep) w.onSyncStep();
   }
-  console.log(msg);
 }
 
 export function logStepError(msg: string) {
@@ -399,8 +398,6 @@ export async function pullProjectData(): Promise<void> {
         }
       }
     });
-
-    console.log(`[SYNC_ENGINE] Successfully pulled ${projects.length} projects.`);
   } catch (err) {
     console.error("[SYNC_ENGINE] Pull failed:", err);
     throw err;
