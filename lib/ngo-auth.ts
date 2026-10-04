@@ -201,7 +201,7 @@ export async function authenticateNgoWithPassword(
 
   // individual
   debug.stage = "lookup-individual";
-  const { data: indVerif } = await supabase
+  const { data: indVerif, error: indVerifError } = await supabase
     .from("individual_verifications")
     .select("verification_status")
     .eq("user_id", userRow.id)
@@ -209,6 +209,23 @@ export async function authenticateNgoWithPassword(
 
   debug.individualVerificationStatus =
     normalizeStatus(indVerif?.verification_status) || verificationStatus || undefined;
+
+  if (indVerifError) {
+    return {
+      allowed: false,
+      reason: "Sign-in is temporarily unavailable. Try again shortly.",
+      debug: { ...debug, stage: "individual-verification-error" },
+    };
+  }
+
+  const individualVerificationStatus = normalizeStatus(indVerif?.verification_status);
+  if (individualVerificationStatus !== "verified" || verificationStatus !== "verified") {
+    return {
+      allowed: false,
+      reason: `Verification is ${individualVerificationStatus || verificationStatus || "incomplete"}. Fully verified accounts can access the field app.`,
+      debug: { ...debug, stage: "individual-not-verified" },
+    };
+  }
 
   return {
     allowed: true,

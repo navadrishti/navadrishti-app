@@ -38,6 +38,17 @@ function ngoUser(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function individualUser(overrides: Record<string, unknown> = {}) {
+  return {
+    ...ngoUser(),
+    id: 8,
+    name: "Ravi Kumar",
+    email: "individual@example.org",
+    user_type: "individual",
+    ...overrides,
+  };
+}
+
 function loginRequest(password = "correct-horse") {
   return new NextRequest("http://field.test/api/login", {
     method: "POST",
@@ -87,5 +98,30 @@ describe("POST /api/login", () => {
     const response = await POST(loginRequest());
     const body = await response.json();
     expect(body.error).not.toMatch(/relation/);
+  });
+
+  it("requires a verified individual verification record", async () => {
+    fake.reset({
+      "users.select": [{ data: individualUser() }],
+      "individual_verifications.select": [{ data: { verification_status: "pending" } }],
+    });
+
+    const response = await POST(
+      new NextRequest("http://field.test/api/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: "individual@example.org",
+          password: "correct-horse",
+          device_id: "dev-1",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Verification is pending"),
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/session";
-import { getMissingServerEnv, getSessionSecret, hasServerEnv } from "@/lib/env";
+import { getMissingServerEnv, hasServerEnv } from "@/lib/env";
 import { getMissingServerSupabaseEnv, hasServerSupabaseEnv } from "@/lib/supabase-server";
 import { getServerSupabaseClient } from "@/lib/supabase-server";
 import { resolveUserAvatarUrl } from "@/lib/utils";

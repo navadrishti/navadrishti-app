@@ -32,36 +32,26 @@ const LAST_USER_KEY = "navadrishti.lastUserId";
 const AppContext = createContext<AppContextValue | null>(null);
 
 /**
- * Full wipe — called on USER SWITCH.
- * Clears all local tables including the user's own submissions and queue.
+ * Called on USER SWITCH. Shared caches and the previous user's synced history are removed.
+ * Unsynced marks and evidence stay: they are scoped to their owner and upload when that user signs in again.
  */
-async function clearAllLocalData() {
+async function clearDataForUserSwitch(nextUserId: string) {
   try {
     await db.transaction(
       "rw",
-      [
-        db.recordsLocal,
-        db.mediaLocal,
-        db.syncQueue,
-        db.syncLog,
-        db.milestones,
-        db.referencePoints,
-        db.attendanceCache,
-        db.attendanceOutbox,
-      ],
+      [db.recordsLocal, db.syncLog, db.milestones, db.referencePoints, db.attendanceCache],
       async () => {
-        await db.recordsLocal.clear();
-        await db.mediaLocal.clear();
-        await db.syncQueue.clear();
+        await db.recordsLocal
+          .filter((record) => record.userId !== nextUserId && record.status === "synced")
+          .delete();
         await db.syncLog.clear();
         await db.milestones.clear();
         await db.referencePoints.clear();
         await db.attendanceCache.clear();
-        await db.attendanceOutbox.clear();
       }
     );
   } catch (err) {
-    console.error("[AppProvider] Failed to clear local data:", err);
+    console.error("[AppProvider] Failed to clear local data on user switch:", err);
   }
 }
 
@@ -226,7 +216,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const applySession = useCallback(async (nextSession: AppSession) => {
     const lastUserId = window.localStorage.getItem(LAST_USER_KEY);
     if (lastUserId && lastUserId !== nextSession.id) {
-      await clearAllLocalData();
+      await clearDataForUserSwitch(nextSession.id);
     }
     window.localStorage.setItem(LAST_USER_KEY, nextSession.id);
     window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));

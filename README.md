@@ -3,6 +3,11 @@
 Installable Next.js PWA for NGO / individual field attendance and evidence capture.  
 Hosted separately from the main GRAM platform; shares the same Supabase project.
 
+Offline evidence and attendance are stored in IndexedDB and synchronized while the
+app is open and online. Failed submissions can be retried or discarded from the
+recent device history; the browser does not upload queued media after the app is
+terminated.
+
 ## Local
 
 ```bash
@@ -20,4 +25,4 @@ npm run dev -- -p 3001
 
 ## Env
 
-See `.env.example`. Required: Supabase URL + keys, `SESSION_SECRET`, Cloudinary keys.
+See `.env.example`. Required: Supabase URL + keys, `SESSION_SECRET`, and all three Cloudinary keys.

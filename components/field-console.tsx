@@ -11,8 +11,10 @@ import { apiFetch } from "@/lib/env";
 import { isLockedMilestoneStatus } from "@/lib/evidence-rules";
 import {
   applyPendingAttendanceOverlay,
+  discardSyncItem,
   enqueueAttendanceMark,
   readAttendanceCache,
+  retrySyncItem,
   saveAttendanceCache,
 } from "@/lib/sync-engine";
 import { getDeviceId, getCurrentPosition, getLocalDateStringClient, cloudinaryAvatarUrl, getInitials } from "@/lib/utils";
@@ -143,6 +145,27 @@ export function FieldConsole() {
       outbox.filter((row) => pendingStatuses.has(row.status)).length
     );
   }, [session?.id], 0);
+
+  const handleRetryRecord = async (recordId: string) => {
+    if (!session) return;
+    try {
+      await retrySyncItem(recordId, session.id);
+      setSubmitState({ tone: "success", message: "Record queued for retry." });
+      if (isOnline) await syncNow();
+    } catch (error) {
+      setSubmitState({ tone: "error", message: error instanceof Error ? error.message : "Retry failed." });
+    }
+  };
+
+  const handleDiscardRecord = async (recordId: string) => {
+    if (!session || !window.confirm("Discard this unsynced record and its photos?")) return;
+    try {
+      await discardSyncItem(recordId, session.id);
+      setSubmitState({ tone: "success", message: "Unsynced record discarded." });
+    } catch (error) {
+      setSubmitState({ tone: "error", message: error instanceof Error ? error.message : "Discard failed." });
+    }
+  };
 
   // Camera Controls
   const stopCamera = useCallback(() => {
@@ -424,6 +447,17 @@ export function FieldConsole() {
                       <div className={`status-badge status-${r.status}`}>{r.status}</div>
                     </div>
                     <LedgerItemMedia media={r.media} onPreview={setActivePreviewUrl} />
+                    {r.status === "failed" ? (
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                        <span className="ledger-meta">{r.lastError || "Sync failed."}</span>
+                        <button type="button" className="btn-outline" onClick={() => void handleRetryRecord(r.id)}>
+                          Retry
+                        </button>
+                        <button type="button" className="btn-outline" onClick={() => void handleDiscardRecord(r.id)}>
+                          Discard
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 ))
               )}
@@ -498,6 +532,18 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
     item: any;
     mode: "selfie" | "photo";
   } | null>(null);
+  const failedAttendance = useLiveQuery(
+    async () =>
+      session?.id
+        ? db.attendanceOutbox
+            .where("userId")
+            .equals(session.id)
+            .filter((row) => row.status === "failed")
+            .toArray()
+        : [],
+    [session?.id],
+    []
+  );
 
   const load = useCallback(async () => {
     if (!session?.id) return;
@@ -569,6 +615,8 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
   const campaignItems = bucket === "active" ? activeCampaigns : historyCampaigns;
   const skillItems = bucket === "active" ? activeSkills : historySkills;
   const isHistory = bucket === "history";
+  // Individuals see this section only when they hired a daily service they need to mark.
+  const showSkills = showSkillSection || activeSkills.length + historySkills.length > 0;
 
   const markedToday = (summary: any) =>
     String(summary?.last_attendance_at || "") === getLocalDateStringClient();
@@ -590,6 +638,28 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
     setCaptureTarget({ item, mode });
   }
 
+  async function retryAttendance(id: string) {
+    if (!session) return;
+    try {
+      await retrySyncItem(id, session.id);
+      setMessage("Attendance queued for retry.");
+      if (isOnline) await syncNow();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not retry attendance.");
+    }
+  }
+
+  async function discardAttendance(id: string) {
+    if (!session || !window.confirm("Discard this unsynced attendance mark and its photos?")) return;
+    try {
+      await discardSyncItem(id, session.id);
+      setMessage("Unsynced attendance was discarded.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not discard attendance.");
+    }
+  }
+
   if (loading) {
     return <AttendancePanelSkeleton showSkillSection={showSkillSection} />;
   }
@@ -598,6 +668,27 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
     <div className="attendance-console">
       {error ? <div className="form-error">{error}</div> : null}
       {message ? <div className="attendance-banner">{message}</div> : null}
+      {failedAttendance?.length ? (
+        <section className="card-section" aria-label="Failed attendance uploads">
+          <span className="section-title">Attendance needing attention</span>
+          {failedAttendance.map((row) => (
+            <div key={row.id} className="ledger-item" style={{ alignItems: "center", gap: "8px" }}>
+              <div className="ledger-info">
+                <div className="ledger-title">{row.title || "Attendance mark"}</div>
+                <div className="ledger-meta">
+                  {row.attendanceDate} · {row.lastError || "Upload failed."}
+                </div>
+              </div>
+              <button type="button" className="btn-outline" onClick={() => void retryAttendance(row.id)}>
+                Retry
+              </button>
+              <button type="button" className="btn-outline" onClick={() => void discardAttendance(row.id)}>
+                Discard
+              </button>
+            </div>
+          ))}
+        </section>
+      ) : null}
       {!isOnline ? (
         <div className="attendance-banner">
           Offline mode — marks are saved on this device and sync under your login when internet returns.
@@ -612,7 +703,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
         >
           Active
           <span className="attendance-count">
-            {activeCampaigns.length + (showSkillSection ? activeSkills.length : 0)}
+            {activeCampaigns.length + (showSkills ? activeSkills.length : 0)}
           </span>
         </button>
         <button
@@ -622,7 +713,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
         >
           History
           <span className="attendance-count">
-            {historyCampaigns.length + (showSkillSection ? historySkills.length : 0)}
+            {historyCampaigns.length + (showSkills ? historySkills.length : 0)}
           </span>
         </button>
       </nav>
@@ -687,21 +778,21 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
         )}
       </section>
 
-      {showSkillSection ? (
+      {showSkills ? (
         <section className="field-section">
           <div className="section-heading">
-            <h2>{isHistory ? "Past skill / service needs" : "Skill / service needs"}</h2>
+            <h2>{isHistory ? "Past daily services" : "Daily services"}</h2>
             <p className="subtle">
               {isHistory
-                ? "Completed or cancelled skill/service assignments."
-                : "Mark the assignee present once per day with sealed photos (up to 3). Stamped with date, time and location; today's mark cannot be edited."}
+                ? "Completed or cancelled skill needs and hired services."
+                : "Mark the person working for you present once per day with sealed photos (up to 3). Each mark is stamped with date, time and location, adds one day to what you owe, and cannot be edited."}
             </p>
           </div>
           {skillItems.length === 0 ? (
             <p className="subtle">
               {isHistory
-                ? "No past skill/service assignments."
-                : "No skill/service assignments to mark right now."}
+                ? "No past daily services."
+                : "No daily services to mark right now."}
             </p>
           ) : (
             <div className="attendance-list">
@@ -713,6 +804,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                     <div>
                       <h3>{item.title}</h3>
                       <p className="subtle">
+                        {item.kind === "service_offer" ? "Provider: " : ""}
                         {item.subtitle}
                         {item.assignee_email ? ` · ${item.assignee_email}` : ""}
                       </p>
@@ -725,7 +817,10 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                           : "Not set"}
                       </span>
                       <span>Days present: {daysPresent(summary)}</span>
-                      <span>Due: INR {Number(summary.total_due || 0).toLocaleString("en-IN")}</span>
+                      <span>
+                        Unpaid: INR{" "}
+                        {Math.max(0, Number(summary.total_due || 0) - Number(summary.paid_total || 0)).toLocaleString("en-IN")}
+                      </span>
                       <span>Last marked: {summary.last_attendance_at || "Not yet"}</span>
                     </div>
                     {!isHistory ? (

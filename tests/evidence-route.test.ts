@@ -125,7 +125,7 @@ describe("POST /api/evidence", () => {
   it("returns the recorded event on a retry instead of writing again", async () => {
     fake.reset({
       "users.select": [activeUser],
-      "field_events.select": [{ data: { id: "fe-1", payload_hash: "hash" } }],
+      "field_events.select": [{ data: { id: "fe-1", payload_hash: "hash", ngo_id: 7, entity_id: "m-1" } }],
     });
 
     const response = await POST(evidenceRequest());
