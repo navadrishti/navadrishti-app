@@ -113,6 +113,15 @@ export function getMissingServerEnv(): string[] {
     missing.push("SESSION_SECRET (or APP_SESSION_SECRET / JWT_SECRET)");
   }
 
+  const cloudinaryKeys = [
+    ["CLOUDINARY_CLOUD_NAME", process.env.CLOUDINARY_CLOUD_NAME],
+    ["CLOUDINARY_API_KEY", process.env.CLOUDINARY_API_KEY],
+    ["CLOUDINARY_API_SECRET", process.env.CLOUDINARY_API_SECRET],
+  ] as const;
+  for (const [key, value] of cloudinaryKeys) {
+    if (!value) missing.push(key);
+  }
+
   return missing;
 }
 

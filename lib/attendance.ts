@@ -5,7 +5,7 @@ import { findAccountBlockReason } from "@/lib/account-access";
 
 export const CAMPAIGN_VOLUNTEER_ENGAGEMENT_KIND = "campaign_volunteer";
 
-export type AttendanceKind = "campaign_volunteer" | "skill_service";
+export type AttendanceKind = "campaign_volunteer" | "skill_service" | "service_offer";
 export type AttendanceBucket = "active" | "history";
 
 export class AttendanceError extends Error {
@@ -59,11 +59,16 @@ export function safeJson(value: unknown): Record<string, any> {
   return {};
 }
 
+/** Attendance days follow India time; the server itself usually runs in UTC. */
+const ATTENDANCE_TIME_ZONE = "Asia/Kolkata";
+
 export function getLocalDateString(reference: Date = new Date()): string {
-  const year = reference.getFullYear();
-  const month = String(reference.getMonth() + 1).padStart(2, "0");
-  const day = String(reference.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: ATTENDANCE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(reference);
 }
 
 export function toNumber(value: unknown, fallback = 0): number {
@@ -82,6 +87,24 @@ export function isCampaignVolunteerAssignment(assignment: {
     assignment.target_type === "csr_project" &&
     meta.engagement_kind === CAMPAIGN_VOLUNTEER_ENGAGEMENT_KIND
   );
+}
+
+/**
+ * Daily-billed service offer rentals: the client (assignee) confirms the provider showed up and pays per day.
+ * CSR capability rentals are paid upfront and are not billed through attendance.
+ */
+export function isDailyServiceOfferAssignment(assignment: {
+  target_type?: string;
+  payment_mode?: string | null;
+  billing_cycle?: string | null;
+  meta?: unknown;
+} | null | undefined): boolean {
+  if (!assignment || assignment.target_type !== "service_offer") return false;
+  const meta = safeJson(assignment.meta);
+  if (meta.flow === "csr_capability_rental") return false;
+  const paymentMode = String(assignment.payment_mode || meta.payment_mode || "").toLowerCase();
+  const billingCycle = String(assignment.billing_cycle || meta.billing_cycle || "").toLowerCase();
+  return paymentMode === "daily_due" || billingCycle === "daily";
 }
 
 export function resolveCampaignIdFromAssignment(assignment: {
@@ -400,6 +423,50 @@ export async function listAttendanceAssignments(userId: number) {
     });
   }
 
+  const hiredOffers = rows.filter(
+    (row) => Number(row.assignee_user_id) === Number(userId) && isDailyServiceOfferAssignment(row)
+  );
+  if (hiredOffers.length > 0) {
+    const offerIds = [...new Set(hiredOffers.map((row) => Number(row.target_id || 0)).filter((id) => id > 0))];
+    const providerIds = [...new Set(hiredOffers.map((row) => Number(row.owner_user_id || 0)).filter((id) => id > 0))];
+    const [{ data: offers }, { data: providers }] = await Promise.all([
+      offerIds.length > 0
+        ? supabase.from("service_offers").select("id, title").in("id", offerIds)
+        : Promise.resolve({ data: [] as any[] }),
+      providerIds.length > 0
+        ? supabase.from("users").select("id, name, email").in("id", providerIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+    const offersById = new Map((offers || []).map((row) => [Number(row.id), row]));
+    const providersById = new Map((providers || []).map((row) => [Number(row.id), row]));
+
+    for (const assignment of hiredOffers) {
+      const status = String(assignment.status || "").toLowerCase();
+      const isHistory = HISTORY_ASSIGNMENT_STATUSES.has(status);
+      const canMark = !isHistory && ACTIVE_ASSIGNMENT_STATUSES.has(status);
+      const meta = safeJson(assignment.meta);
+      const provider = providersById.get(Number(assignment.owner_user_id));
+      const bucket = isHistory ? history : active;
+
+      bucket.skillItems.push({
+        kind: "service_offer" as const,
+        assignment_id: assignment.id,
+        title: offersById.get(Number(assignment.target_id))?.title || "Hired service",
+        subtitle: provider?.name || "Service provider",
+        assignee_email: provider?.email || null,
+        request_status: null,
+        assignment_status: assignment.status || null,
+        daily_rate: toNumber(assignment.rate_per_unit ?? meta.rate_per_unit, 0),
+        attendance_summary: meta.attendance_summary || {},
+        can_mark: canMark,
+        mark_blocked_reason: canMark ? null : "This engagement is no longer active",
+        mark_mode: "client_mark" as const,
+        assignee_user_id: Number(assignment.owner_user_id || 0) || null,
+        bucket: isHistory ? ("history" as const) : ("active" as const),
+      });
+    }
+  }
+
   return {
     active,
     history,
@@ -493,9 +560,16 @@ export async function markAttendance(input: {
     if (!ACTIVE_ASSIGNMENT_STATUSES.has(status)) {
       throw new AttendanceError("This assignment is closed", 422);
     }
+  } else if (isDailyServiceOfferAssignment(assignment)) {
+    if (!isAssignee) throw new AttendanceError("Only the client who hired this service can mark daily attendance", 403);
+    const status = String(assignment.status || "").toLowerCase();
+    if (!ACTIVE_ASSIGNMENT_STATUSES.has(status)) {
+      throw new AttendanceError("This engagement is closed", 422);
+    }
   } else {
     throw new AttendanceError("This assignment type cannot be marked from the field app", 422);
   }
+  const isServiceOffer = assignment.target_type === "service_offer";
 
   const { data: existing } = await supabase
     .from("service_attendance_entries")
@@ -567,9 +641,8 @@ export async function markAttendance(input: {
     toNumber(campaignApplication?.capacity ?? safeJson(assignment.meta).volunteer_capacity, 1) || 1
   );
   const requestedUnits = input.units != null && input.units > 0 ? input.units : null;
-  const units = isCampaign
-    ? Math.min(requestedUnits ?? campaignUnitCap, campaignUnitCap)
-    : requestedUnits ?? 1;
+  // One assignee per skill or rental engagement, billed one day at a time.
+  const units = isCampaign ? Math.min(requestedUnits ?? campaignUnitCap, campaignUnitCap) : 1;
 
   const ratePerUnit = toNumber(assignment.rate_per_unit ?? safeJson(assignment.meta).rate_per_unit, 0);
   const status =
@@ -606,13 +679,17 @@ export async function markAttendance(input: {
       target_id: assignment.target_id,
       application_table:
         assignment.application_table ||
-        (assignment.target_type === "campaign" ? "campaigns" : "service_request_applications"),
+        (assignment.target_type === "campaign"
+          ? "campaigns"
+          : isServiceOffer
+            ? "service_clients"
+            : "service_request_applications"),
       application_id: assignment.application_id ?? null,
       attendance_date: today,
       attendance_status: status,
       attendance_source: attendanceSource,
       marked_by_user_id: userId,
-      marked_for_user_id: Number(assignment.assignee_user_id || userId),
+      marked_for_user_id: Number((isServiceOffer ? assignment.owner_user_id : assignment.assignee_user_id) || userId),
       units,
       multiplier: 1,
       rate_per_unit: ratePerUnit || null,

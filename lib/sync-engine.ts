@@ -256,12 +256,21 @@ async function failQueueItem(item: SyncQueueItem, message: string) {
  * Uses the session cookie from the same browser login.
  */
 export async function processSyncQueue(sessionUserId: string): Promise<SyncRunResult> {
-  if (!window.navigator.onLine || !sessionUserId) {
-    return { processed: 0, succeeded: 0, failed: 0, authExpired: false };
-  }
+  const idle: SyncRunResult = { processed: 0, succeeded: 0, failed: 0, authExpired: false };
+  if (!window.navigator.onLine || !sessionUserId) return idle;
+
+  // Only one tab uploads at a time; another tab that finds the lock taken skips this round.
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (!locks) return runSyncBatch(sessionUserId);
+  return locks.request("navadrishti-sync-queue", { ifAvailable: true }, async (lock) =>
+    lock ? runSyncBatch(sessionUserId) : idle
+  );
+}
+
+async function runSyncBatch(sessionUserId: string): Promise<SyncRunResult> {
 
   const now = Date.now();
-  // Terminal failures are parked at -1 and only retried when the user asks.
+  // Terminal failures are parked at -1 until the user explicitly retries them.
   const allDue = await db.syncQueue
     .filter((item) => item.nextAttemptAt >= 0 && item.nextAttemptAt <= now)
     .sortBy("nextAttemptAt");
@@ -404,6 +413,45 @@ export async function pullProjectData(): Promise<void> {
   }
 }
 
+export async function retrySyncItem(recordId: string, userId: string) {
+  const item = await db.syncQueue.get(recordId);
+  if (!item || item.userId !== userId) throw new Error("Sync item not found.");
+
+  await db.transaction("rw", [db.syncQueue, db.recordsLocal, db.attendanceOutbox], async () => {
+    await db.syncQueue.update(item.id, {
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      lastError: null,
+      updatedAt: new Date().toISOString(),
+    });
+    if (item.kind === "attendance") {
+      await db.attendanceOutbox.update(item.recordId, { status: "pending", lastError: null });
+    } else {
+      await db.recordsLocal.update(item.recordId, { status: "pending", lastError: null });
+    }
+  });
+}
+
+export async function discardSyncItem(recordId: string, userId: string) {
+  const item = await db.syncQueue.get(recordId);
+  if (!item || item.userId !== userId) throw new Error("Sync item not found.");
+
+  await db.transaction(
+    "rw",
+    [db.syncQueue, db.recordsLocal, db.attendanceOutbox, db.mediaLocal],
+    async () => {
+      await db.syncQueue.delete(item.id);
+      await db.mediaLocal.where("recordId").equals(item.recordId).delete();
+      if (item.kind === "attendance") {
+        await db.attendanceOutbox.delete(item.recordId);
+      } else {
+        await db.recordsLocal.delete(item.recordId);
+      }
+    }
+  );
+}
+
 export async function saveAttendanceCache(
   userId: string,
   payload: Omit<AttendanceAssignmentCache, "userId" | "updatedAt">
@@ -419,6 +467,34 @@ export async function readAttendanceCache(userId: string) {
   return db.attendanceCache.get(userId);
 }
 
+/** A mark the server refused for good (or that ran out of retries) must not block marking again. */
+async function isParkedAttendanceFailure(row: AttendanceOutboxItem): Promise<boolean> {
+  if (row.status !== "failed") return false;
+  const queueItem = await db.syncQueue.get(row.id);
+  return !queueItem || queueItem.nextAttemptAt < 0;
+}
+
+async function discardAttendanceMark(outboxId: string) {
+  await db.transaction("rw", [db.attendanceOutbox, db.mediaLocal, db.syncQueue], async () => {
+    await db.mediaLocal.where("recordId").equals(outboxId).delete();
+    await db.syncQueue.delete(outboxId);
+    await db.attendanceOutbox.delete(outboxId);
+  });
+}
+
+async function liveMarksForToday(userId: string, today: string) {
+  const rows = await db.attendanceOutbox
+    .where("userId")
+    .equals(userId)
+    .filter((row) => row.status !== "synced" && row.attendanceDate === today)
+    .toArray();
+  const live: AttendanceOutboxItem[] = [];
+  for (const row of rows) {
+    if (!(await isParkedAttendanceFailure(row))) live.push(row);
+  }
+  return live;
+}
+
 /** Merge pending local marks into roster so offline UI shows "already marked today". */
 export async function applyPendingAttendanceOverlay(
   userId: string,
@@ -430,11 +506,7 @@ export async function applyPendingAttendanceOverlay(
   }
 ) {
   const today = getLocalDateStringClient();
-  const pending = await db.attendanceOutbox
-    .where("userId")
-    .equals(userId)
-    .filter((row) => row.status !== "synced" && row.attendanceDate === today)
-    .toArray();
+  const pending = await liveMarksForToday(userId, today);
 
   if (pending.length === 0) return lists;
 
@@ -475,7 +547,7 @@ export async function enqueueAttendanceMark(input: {
   photos: Array<{ blob: Blob; name: string; proofHash: string; capturedAt: string }>;
 }) {
   const today = getLocalDateStringClient();
-  const existing = await db.attendanceOutbox
+  const sameDay = await db.attendanceOutbox
     .where("userId")
     .equals(input.userId)
     .filter(
@@ -484,10 +556,14 @@ export async function enqueueAttendanceMark(input: {
         row.attendanceDate === today &&
         row.status !== "synced"
     )
-    .first();
+    .toArray();
 
-  if (existing) {
-    throw new Error("Today's attendance is already saved on this device (waiting to sync).");
+  for (const row of sameDay) {
+    if (await isParkedAttendanceFailure(row)) {
+      await discardAttendanceMark(row.id);
+    } else {
+      throw new Error("Today's attendance is already saved on this device (waiting to sync).");
+    }
   }
 
   const id = randomUUID();

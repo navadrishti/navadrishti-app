@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ducanh2912/next-pwa": "^10.2.9",
     "@supabase/supabase-js": "^2.99.1",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.9.0",
@@ -21,6 +20,7 @@
     "react-dom": "19.0.0"
   },
   "devDependencies": {
+    "@ducanh2912/next-pwa": "^10.2.9",
     "@types/node": "^22.19.15",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

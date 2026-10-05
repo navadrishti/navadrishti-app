@@ -82,12 +82,19 @@ export async function POST(request: NextRequest) {
 
     const { data: existingEvent, error: existingError } = await supabase
       .from("field_events")
-      .select("id, payload_hash")
+      .select("id, payload_hash, ngo_id, entity_id")
       .eq("event_id", event_id)
       .maybeSingle();
     if (existingError) throw existingError;
 
     if (existingEvent) {
+      if (Number(existingEvent.ngo_id) !== ngoId) {
+        return fail("Evidence event already exists.", 409);
+      }
+      const requestedEntityId = String(data.milestoneId || data.projectId || "").trim();
+      if (requestedEntityId && String(existingEvent.entity_id) !== requestedEntityId) {
+        return fail("Evidence event conflicts with an existing submission.", 409);
+      }
       return NextResponse.json<SyncApiResponse>({
         ok: true,
         eventId: existingEvent.id,

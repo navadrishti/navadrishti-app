@@ -82,6 +82,11 @@ describe("attendance date from the device", () => {
     expect(resolveAttendanceDate("2026-09-30", reference)).toBe("2026-09-30");
   });
 
+  it("uses the India date even when the server clock is in UTC", () => {
+    expect(getLocalDateString(new Date("2026-09-29T19:00:00Z"))).toBe("2026-09-30");
+    expect(getLocalDateString(new Date("2026-09-29T18:00:00Z"))).toBe("2026-09-29");
+  });
+
   it("refuses malformed, future and week-old dates", () => {
     expect(() => resolveAttendanceDate("29-09-2026", reference)).toThrow(AttendanceError);
     expect(() => resolveAttendanceDate("2026-10-01", reference)).toThrow(/too old/);
@@ -143,6 +148,66 @@ describe("POST /api/attendance/[assignmentId]", () => {
 
     const response = await POST(attendanceRequest(), context);
     expect(response.status).toBe(409);
+  });
+
+  describe("daily service offer rentals", () => {
+    const offerRental = {
+      id: "as-1",
+      target_type: "service_offer",
+      target_id: "15",
+      owner_user_id: 3,
+      assignee_user_id: 7,
+      application_table: "service_clients",
+      application_id: "40",
+      status: "active",
+      billing_cycle: "daily",
+      payment_mode: "daily_due",
+      rate_per_unit: 800,
+      meta: {},
+    };
+
+    it("lets the client mark the provider present for one billed day", async () => {
+      fake.reset({
+        "users.select": [activeUser],
+        "service_engagement_assignments.select": [{ data: offerRental }, { data: { meta: {} } }],
+        "service_attendance_entries.select": [
+          { data: null },
+          { data: [{ attendance_date: today, attendance_status: "present", amount_due: 800, payment_status: "pending" }] },
+        ],
+        "service_attendance_entries.insert": [{ data: { id: "att-2" } }],
+      });
+
+      const response = await POST(attendanceRequest({ attendanceDate: today, units: "5" }), context);
+      expect(response.status).toBe(201);
+      const [insert] = fake.find("service_attendance_entries", "insert");
+      expect(insert.payload).toMatchObject({
+        units: 1,
+        amount_due: 800,
+        payment_status: "pending",
+        application_table: "service_clients",
+        marked_by_user_id: 7,
+        marked_for_user_id: 3,
+      });
+    });
+
+    it("refuses the provider marking their own attendance", async () => {
+      fake.reset({
+        "users.select": [activeUser],
+        "service_engagement_assignments.select": [{ data: { ...offerRental, owner_user_id: 7, assignee_user_id: 4 } }],
+      });
+      const response = await POST(attendanceRequest(), context);
+      expect(response.status).toBe(403);
+      expect(fake.find("service_attendance_entries", "insert")).toHaveLength(0);
+    });
+
+    it("does not bill CSR capability rentals through attendance", async () => {
+      fake.reset({
+        "users.select": [activeUser],
+        "service_engagement_assignments.select": [{ data: { ...offerRental, meta: { flow: "csr_capability_rental" } } }],
+      });
+      const response = await POST(attendanceRequest(), context);
+      expect(response.status).toBe(422);
+    });
   });
 
   it("refuses marks on a closed campaign assignment", async () => {
