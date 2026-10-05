@@ -1,18 +1,18 @@
 import bcrypt from "bcryptjs";
+import { resolveUserAvatarUrl } from "@/lib/utils";
 import { getServerSupabaseClient } from "@/lib/supabase-server";
+import { getAccountAccessBlockReason } from "@/lib/account-access";
 
-interface NgoAuthDebugUser {
+interface AuthDebugUser {
   id: number | null;
   email: string;
   userType: string;
-  verified: boolean | null;
   emailVerified: boolean | null;
   phoneVerified: boolean | null;
-  identityVerified: boolean | null;
-  effectiveIdentityVerified?: boolean;
-  effectiveIdentityReason?: string;
   verificationStatus: string;
   accountStatus: string;
+  effectiveIdentityVerified?: boolean;
+  effectiveIdentityReason?: string;
 }
 
 export interface NgoAuthResult {
@@ -21,51 +21,54 @@ export interface NgoAuthResult {
   ngoId?: number;
   ngoName?: string;
   email?: string;
+  role?: string;
+  avatarUrl?: string | null;
   debug: {
     stage: string;
     authEmail: string;
     userLookupError?: string;
-    user: NgoAuthDebugUser | null;
+    user: AuthDebugUser | null;
     passwordMatched?: boolean;
     passwordFormat?: string;
     identityGatePassed?: boolean;
     identityGateReason?: string;
     ngoVerificationLookupError?: string;
     ngoVerificationStatus?: string;
+    individualVerificationStatus?: string;
   };
 }
+
+const FIELD_APP_ROLES = new Set(["ngo", "individual"]);
 
 function normalizeStatus(value: unknown) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
 function detectPasswordFormat(storedPassword: string) {
-  if (storedPassword.startsWith("$2a$") || storedPassword.startsWith("$2b$") || storedPassword.startsWith("$2y$")) {
+  if (
+    storedPassword.startsWith("$2a$") ||
+    storedPassword.startsWith("$2b$") ||
+    storedPassword.startsWith("$2y$")
+  ) {
     return "bcrypt";
   }
-
   return "plain";
 }
 
+// The platform only stores bcrypt hashes; anything else must not authenticate.
 async function comparePassword(inputPassword: string, storedPassword: string) {
   const passwordFormat = detectPasswordFormat(storedPassword);
-
-  if (passwordFormat === "bcrypt") {
-    return {
-      passwordFormat,
-      passwordMatched: await bcrypt.compare(inputPassword, storedPassword),
-    };
-  }
-
   return {
     passwordFormat,
-    passwordMatched: storedPassword === inputPassword,
+    passwordMatched:
+      passwordFormat === "bcrypt" && (await bcrypt.compare(inputPassword, storedPassword)),
   };
 }
 
 export async function authenticateNgoWithPassword(
   email: string,
   password: string,
+  deviceId?: string
 ): Promise<NgoAuthResult> {
   const normalizedEmail = email.trim().toLowerCase();
   const supabase = getServerSupabaseClient();
@@ -78,7 +81,7 @@ export async function authenticateNgoWithPassword(
   const { data: userRow, error: userError } = await supabase
     .from("users")
     .select(
-      "id, name, email, password, user_type, verified, email_verified, phone_verified, identity_verified, verification_status, account_status",
+      "id, name, email, password, user_type, email_verified, phone_verified, verification_status, account_status, locked_until, device_id, profile_image, profile_data"
     )
     .ilike("email", normalizedEmail)
     .maybeSingle();
@@ -88,25 +91,21 @@ export async function authenticateNgoWithPassword(
   if (userError || !userRow) {
     return {
       allowed: false,
-      reason: userError
-        ? `Unable to load platform user record: ${userError.message}`
-        : "Invalid email or password.",
+      reason: userError ? "Sign-in is temporarily unavailable. Try again shortly." : "Invalid email or password.",
       debug,
     };
   }
 
+  const userType = normalizeStatus(userRow.user_type);
+  const verificationStatus = normalizeStatus(userRow.verification_status);
+
   debug.user = {
     id: typeof userRow.id === "number" ? userRow.id : null,
     email: typeof userRow.email === "string" ? userRow.email : normalizedEmail,
-    userType: normalizeStatus(userRow.user_type),
-    verified: typeof userRow.verified === "boolean" ? userRow.verified : null,
-    emailVerified:
-      typeof userRow.email_verified === "boolean" ? userRow.email_verified : null,
-    phoneVerified:
-      typeof userRow.phone_verified === "boolean" ? userRow.phone_verified : null,
-    identityVerified:
-      typeof userRow.identity_verified === "boolean" ? userRow.identity_verified : null,
-    verificationStatus: normalizeStatus(userRow.verification_status),
+    userType,
+    emailVerified: typeof userRow.email_verified === "boolean" ? userRow.email_verified : null,
+    phoneVerified: typeof userRow.phone_verified === "boolean" ? userRow.phone_verified : null,
+    verificationStatus,
     accountStatus: normalizeStatus(userRow.account_status),
   };
 
@@ -123,92 +122,108 @@ export async function authenticateNgoWithPassword(
     };
   }
 
-  if (debug.user.userType !== "ngo") {
+  const blockReason = getAccountAccessBlockReason(userRow);
+  if (blockReason) {
+    return { allowed: false, reason: blockReason, debug: { ...debug, stage: "account-blocked" } };
+  }
+
+  if (!FIELD_APP_ROLES.has(userType)) {
     return {
       allowed: false,
-      reason: "Only NGO accounts can access the Navadrishti field app.",
+      reason: "Only NGO and individual accounts can use the field app.",
       debug,
     };
   }
 
-  if (!userRow.email_verified) {
+  const displayName =
+    (typeof userRow.name === "string" && userRow.name.trim()) ||
+    (typeof userRow.email === "string" ? userRow.email : normalizedEmail);
+  const avatarUrl = resolveUserAvatarUrl({
+    profileImage: userRow.profile_image,
+    profileData: userRow.profile_data,
+  });
+
+  if (userType === "ngo") {
+    debug.stage = "lookup-ngo-verification";
+    const { data: ngoVerif, error: ngoVerifError } = await supabase
+      .from("ngo_verifications")
+      .select("ngo_name, verification_status")
+      .eq("user_id", userRow.id)
+      .maybeSingle();
+
+    debug.ngoVerificationLookupError = ngoVerifError?.message;
+    debug.ngoVerificationStatus = normalizeStatus(ngoVerif?.verification_status);
+
+    if (ngoVerifError || !ngoVerif) {
+      return {
+        allowed: false,
+        reason: ngoVerifError
+          ? "Sign-in is temporarily unavailable. Try again shortly."
+          : "Verification record not found. Complete your profile on the platform.",
+        debug,
+      };
+    }
+
+    const identityGatePassed =
+      verificationStatus === "verified" || debug.ngoVerificationStatus === "verified";
+    debug.identityGatePassed = identityGatePassed;
+    debug.identityGateReason =
+      verificationStatus === "verified"
+        ? "users.verification_status is verified"
+        : debug.ngoVerificationStatus === "verified"
+          ? "ngo_verifications.verification_status is verified"
+          : "No identity verification signal matched";
+    if (debug.user) {
+      debug.user.effectiveIdentityVerified = identityGatePassed;
+      debug.user.effectiveIdentityReason = debug.identityGateReason;
+    }
+
+    if (!identityGatePassed || debug.ngoVerificationStatus !== "verified") {
+      return {
+        allowed: false,
+        reason: `Verification is ${debug.ngoVerificationStatus || "incomplete"}. Fully verified accounts can access the field app.`,
+        debug,
+      };
+    }
+
     return {
-      allowed: false,
-      reason: "Email is not verified for this NGO account.",
-      debug,
+      allowed: true,
+      reason: "OK",
+      ngoId: userRow.id as number,
+      role: "ngo",
+      ngoName:
+        (typeof ngoVerif?.ngo_name === "string" && ngoVerif.ngo_name.trim()) || displayName,
+      email: typeof userRow.email === "string" ? userRow.email : normalizedEmail,
+      avatarUrl,
+      debug: { ...debug, stage: "authenticated" },
     };
   }
 
-  if (!userRow.phone_verified) {
-    return {
-      allowed: false,
-      reason: "Phone is not verified for this NGO account.",
-      debug,
-    };
-  }
-
-  if (debug.user.verificationStatus && debug.user.verificationStatus !== "verified") {
-    return {
-      allowed: false,
-      reason: `User verification status is ${debug.user.verificationStatus}.`,
-      debug,
-    };
-  }
-
-  if (debug.user.accountStatus === "pending_verification") {
-    return {
-      allowed: false,
-      reason: "Account status is pending verification.",
-      debug,
-    };
-  }
-
-  debug.stage = "lookup-ngo-verification";
-
-  const { data: ngoVerif, error: ngoVerifError } = await supabase
-    .from("ngo_verifications")
-    .select("verification_status, ngo_name")
+  // individual
+  debug.stage = "lookup-individual";
+  const { data: indVerif, error: indVerifError } = await supabase
+    .from("individual_verifications")
+    .select("verification_status")
     .eq("user_id", userRow.id)
     .maybeSingle();
 
-  debug.ngoVerificationLookupError = ngoVerifError?.message;
-  debug.ngoVerificationStatus = normalizeStatus(ngoVerif?.verification_status);
+  debug.individualVerificationStatus =
+    normalizeStatus(indVerif?.verification_status) || verificationStatus || undefined;
 
-  if (ngoVerifError || !ngoVerif) {
+  if (indVerifError) {
     return {
       allowed: false,
-      reason: ngoVerifError
-        ? `Unable to load NGO verification record: ${ngoVerifError.message}`
-        : "NGO verification record not found. Complete your NGO profile on the platform.",
-      debug,
+      reason: "Sign-in is temporarily unavailable. Try again shortly.",
+      debug: { ...debug, stage: "individual-verification-error" },
     };
   }
 
-  const identityGatePassed = Boolean(userRow.identity_verified) || debug.ngoVerificationStatus === "verified";
-  debug.identityGatePassed = identityGatePassed;
-  debug.identityGateReason = userRow.identity_verified
-    ? "users.identity_verified is true"
-    : debug.ngoVerificationStatus === "verified"
-      ? "ngo_verifications.verification_status is verified"
-      : "No identity verification signal matched";
-  if (debug.user) {
-    debug.user.effectiveIdentityVerified = identityGatePassed;
-    debug.user.effectiveIdentityReason = debug.identityGateReason;
-  }
-
-  if (!identityGatePassed) {
+  const individualVerificationStatus = normalizeStatus(indVerif?.verification_status);
+  if (individualVerificationStatus !== "verified" || verificationStatus !== "verified") {
     return {
       allowed: false,
-      reason: "Identity verification is incomplete for this NGO account.",
-      debug,
-    };
-  }
-
-  if (debug.ngoVerificationStatus !== "verified") {
-    return {
-      allowed: false,
-      reason: `NGO verification is ${debug.ngoVerificationStatus || "unknown"}. Only fully verified NGOs can access the field app.`,
-      debug,
+      reason: `Verification is ${individualVerificationStatus || verificationStatus || "incomplete"}. Fully verified accounts can access the field app.`,
+      debug: { ...debug, stage: "individual-not-verified" },
     };
   }
 
@@ -216,13 +231,10 @@ export async function authenticateNgoWithPassword(
     allowed: true,
     reason: "OK",
     ngoId: userRow.id as number,
-    ngoName:
-      (typeof ngoVerif.ngo_name === "string" && ngoVerif.ngo_name.trim()) ||
-      (typeof userRow.name === "string" ? userRow.name : normalizedEmail),
+    role: "individual",
+    ngoName: displayName,
     email: typeof userRow.email === "string" ? userRow.email : normalizedEmail,
-    debug: {
-      ...debug,
-      stage: "authenticated",
-    },
+    avatarUrl,
+    debug: { ...debug, stage: "authenticated" },
   };
 }

@@ -1,48 +1,54 @@
+import React from "react";
 import type { Metadata, Viewport } from "next";
-import { Manrope, IBM_Plex_Mono } from "next/font/google";
+import { Inter } from "next/font/google";
+import { AppProvider } from "@/components/app-provider";
+import { FIELD_APP_NAME, PRODUCT_NAME } from "@/lib/env";
 import "./globals.css";
 
-const manrope = Manrope({
+const inter = Inter({
   subsets: ["latin"],
-  variable: "--font-sans"
+  display: "swap",
 });
 
-const plexMono = IBM_Plex_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500"],
-  variable: "--font-mono"
-});
+const siteTitle = `${PRODUCT_NAME} | Digital OS for Social Impact`;
 
 export const metadata: Metadata = {
-  title: "Navadrishti Login",
-  description: "Login screen for Navadrishti.",
+  title: {
+    absolute: siteTitle,
+    default: siteTitle,
+  },
+  applicationName: FIELD_APP_NAME,
+  description: `${PRODUCT_NAME} App — field attendance and evidence capture, powered by Navadrishti`,
   manifest: "/manifest.webmanifest",
   icons: {
-    icon: "/logo.svg",
-    shortcut: "/logo.svg",
-    apple: "/logo.svg"
+    icon: [
+      { url: "/Gram.png", type: "image/png", sizes: "512x512" },
+      { url: "/Gram.svg", type: "image/svg+xml" },
+    ],
+    apple: [{ url: "/Gram.png", type: "image/png", sizes: "512x512" }],
+    shortcut: ["/Gram.png"],
   },
-  appleWebApp: {
-    capable: true,
-    title: "Navadrishti"
-  }
 };
 
 export const viewport: Viewport = {
-  themeColor: "#f26a2e",
+  themeColor: "#2B3E41",
   width: "device-width",
   initialScale: 1,
-  viewportFit: "cover"
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
-  children
+  children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
     <html lang="en">
-      <body className={`${manrope.variable} ${plexMono.variable}`}>{children}</body>
+      <body className={inter.className}>
+        <AppProvider>{children}</AppProvider>
+      </body>
     </html>
   );
 }

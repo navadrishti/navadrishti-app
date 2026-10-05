@@ -1,20 +1,29 @@
 import crypto from "node:crypto";
 
+import { getSessionMaxAgeSeconds, getSessionSecret as getEnvSessionSecret } from "@/lib/env";
+import { SessionRole } from "./types";
+
 export interface AppSession {
+  id: string;
+  name: string;
   ngoId: number;
   ngoName: string;
   email: string;
+  role: SessionRole;
   issuedAt: number;
   expiresAt: number;
+  deviceId: string;
+  createdAt: string;
+  avatarUrl?: string | null;
 }
 
 export const SESSION_COOKIE_NAME = "navadrishti_session";
 
 function getSessionSecret() {
-  const secret = process.env.APP_SESSION_SECRET;
+  const secret = getEnvSessionSecret();
 
   if (!secret) {
-    throw new Error("APP_SESSION_SECRET is not configured.");
+    throw new Error("SESSION_SECRET (or APP_SESSION_SECRET) is not configured.");
   }
 
   return secret;
@@ -75,5 +84,5 @@ export function verifySessionToken(token: string | undefined) {
 }
 
 export function getSessionCookieMaxAgeSeconds() {
-  return 60 * 60 * 24 * 7;
+  return getSessionMaxAgeSeconds();
 }
