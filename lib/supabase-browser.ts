@@ -24,8 +24,4 @@ export function getSupabaseClient() {
   return cachedClient;
 }
 
-export function hasSupabaseEnv() {
-  return hasBrowserSupabaseEnv();
-}
-
 export { hasBrowserSupabaseEnv };

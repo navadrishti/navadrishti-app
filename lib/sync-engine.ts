@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { apiFetch } from "@/lib/env";
 import { randomUUID } from "@/lib/crypto";
-import { isTerminalSyncStatus } from "@/lib/evidence-rules";
+import { isHistoryProjectStatus, isTerminalSyncStatus } from "@/lib/evidence-rules";
 import { getLocalDateStringClient } from "@/lib/utils";
 import type {
   AttendanceAssignmentCache,
@@ -66,10 +66,26 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
   }
 
   const createdAt = record.submittedAtDevice || new Date().toISOString();
+  const { calculateHash } = await import("@/lib/crypto");
+  const mediaProofHashes: string[] = [];
+  for (const item of media) {
+    const actual = (await calculateHash(item.blob)).toLowerCase();
+    const sealed = String(item.proofHash || "").trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(actual)) {
+      throw new Error("FATAL: Could not hash evidence media for integrity proof.");
+    }
+    if (sealed && /^[a-f0-9]{64}$/.test(sealed) && sealed !== actual) {
+      throw new Error("FATAL: Evidence photo integrity check failed. Recapture and try again.");
+    }
+    mediaProofHashes.push(sealed || actual);
+  }
+  if (media.length > 0 && mediaProofHashes.length !== media.length) {
+    throw new Error("FATAL: Evidence media proof hashes are incomplete.");
+  }
 
   const payloadData = {
     beneficiaryName: record.beneficiaryName,
-    interactionType: record.interactionType,
+    interactionType: record.interactionType || "visit",
     notes: record.notes,
     projectId: record.projectId || null,
     referencePointId: record.referencePointId || null,
@@ -79,6 +95,7 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
     deviceId: record.deviceId,
     userName: record.userName,
     milestoneId: record.milestoneId,
+    mediaProofHashes,
   };
 
   const payload = {
@@ -87,7 +104,8 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
     entity_id: record.milestoneId || record.projectId || "unknown",
     data: payloadData,
     timestamp: createdAt,
-    proof_hash: record.id,
+    proof_hash: mediaProofHashes.join(":") || record.id,
+    media_proof_hashes: mediaProofHashes,
   };
 
   const formData = new FormData();
@@ -106,9 +124,9 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
     throw new Error("AUTH_EXPIRED: Session expired. Sign in again to sync.");
   }
 
-  if (response.status === 409) {
-    // Idempotent success
-  } else if (!response.ok) {
+  // 409 = chain tip conflict / ownership conflict — retryable, not success.
+  // Idempotent replays of the same event_id return 200 from the evidence API.
+  if (!response.ok) {
     let errorBody: { error?: string } = {};
     try {
       errorBody = await response.json();
@@ -156,7 +174,9 @@ async function syncAttendanceToApi(outboxId: string, media: LocalMediaRecord[]) 
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data?.ok) {
     const message = data?.error || `Server returned ${response.status}`;
-    // Already marked today on server — treat as success and clear outbox
+    // Attendance API uses 409 only for "assignment+date already marked" (unique day slot).
+    // Product rule: that day cannot be edited — treat as idempotent sync success for the slot.
+    // This does NOT prove the client's photo payload matches the stored row (first writer wins).
     if (response.status === 409 || /already marked/i.test(String(message))) {
       await db.attendanceOutbox.update(outboxId, {
         status: "synced",
@@ -321,11 +341,14 @@ async function runSyncBatch(sessionUserId: string): Promise<SyncRunResult> {
       if (item.kind === "attendance") {
         await db.attendanceOutbox.update(item.recordId, { status: "syncing", lastError: null });
         await syncAttendanceToApi(item.recordId, media);
+        // Delete local blobs only after the server accepted (or idempotently confirmed) the mark.
         await db.mediaLocal.where("recordId").equals(item.recordId).delete();
         await db.attendanceOutbox.delete(item.recordId);
       } else {
         await db.recordsLocal.update(item.recordId, { status: "syncing", lastError: null });
         await syncEvidenceToApi(item.recordId, media);
+        // Keep the synced evidence row for device history; drop blobs after server receipt.
+        await db.mediaLocal.where("recordId").equals(item.recordId).delete();
       }
 
       await db.syncQueue.delete(item.id);
@@ -377,6 +400,7 @@ export async function pullProjectData(): Promise<void> {
       await db.referencePoints.clear();
 
       for (const project of projects) {
+        if (isHistoryProjectStatus(project.project_status)) continue;
         if (Array.isArray(project.csr_project_milestones)) {
           const milestones = project.csr_project_milestones.map((ms: any) => ({
             id: ms.id,

@@ -28,12 +28,34 @@ export async function getCurrentPosition() {
   });
 }
 
-/** Local YYYY-MM-DD for attendance "already marked today" checks. */
+/**
+ * Attendance calendar day for the field app.
+ * Matches server attendance dating (Asia/Kolkata) so near-midnight marks
+ * do not disagree between device local TZ and platform IST.
+ */
 export function getLocalDateStringClient(reference: Date = new Date()) {
-  const year = reference.getFullYear();
-  const month = String(reference.getMonth() + 1).padStart(2, "0");
-  const day = String(reference.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(reference);
+}
+
+/** Stable device-facing timestamp (IST) — avoids SSR/client locale mismatches. */
+export function formatDeviceDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return String(iso);
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
 }
 
 /**

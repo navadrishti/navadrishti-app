@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   evidenceImmutableHash,
   evidenceMediaType,
+  fieldMilestoneStepLabel,
+  isHistoryProjectStatus,
   isLockedMilestoneStatus,
+  isPaidCompletedMilestoneStatus,
   isTerminalSyncStatus,
+  priorMilestonesArePaidComplete,
+  resolveCurrentFieldMilestone,
   validateEvidenceFiles,
 } from "@/lib/evidence-rules";
 import { getAccountAccessBlockReason } from "@/lib/account-access";
@@ -16,6 +21,40 @@ describe("milestone evidence rules", () => {
     for (const status of ["pending", "submitted", "rejected", "", null]) {
       expect(isLockedMilestoneStatus(status)).toBe(false);
     }
+  });
+
+  it("treats only payment-complete milestones as progress done", () => {
+    expect(isPaidCompletedMilestoneStatus("completed")).toBe(true);
+    expect(isPaidCompletedMilestoneStatus("approved")).toBe(false);
+    expect(isPaidCompletedMilestoneStatus("submitted")).toBe(false);
+    expect(fieldMilestoneStepLabel("approved")).toBe("Awaiting payment");
+    expect(fieldMilestoneStepLabel("completed")).toBe("Done");
+  });
+
+  it("keeps the approved milestone current until payment unlocks the next one", () => {
+    const milestones = [
+      { id: "m1", milestoneOrder: 1, status: "approved" },
+      { id: "m2", milestoneOrder: 2, status: "pending" },
+    ];
+    expect(resolveCurrentFieldMilestone(milestones)?.id).toBe("m1");
+    expect(priorMilestonesArePaidComplete(milestones, "m2")).toBe(false);
+    expect(
+      priorMilestonesArePaidComplete(
+        [
+          { id: "m1", milestone_order: 1, status: "completed" },
+          { id: "m2", milestone_order: 2, status: "pending" },
+        ],
+        "m2"
+      )
+    ).toBe(true);
+  });
+
+  it("treats finished project statuses as history for offline pull", () => {
+    for (const status of ["completed", "closed", "finished", "done", "cancelled", "Canceled"]) {
+      expect(isHistoryProjectStatus(status)).toBe(true);
+    }
+    expect(isHistoryProjectStatus("active")).toBe(false);
+    expect(isHistoryProjectStatus("in_progress")).toBe(false);
   });
 
   it("accepts photos, videos and PDFs but rejects SVG and unknown types", () => {

@@ -8,7 +8,13 @@ import { AttendancePanelSkeleton, CardSectionSkeleton, FieldConsoleSkeleton, Ske
 import { calculateHash } from "@/lib/crypto";
 import { db } from "@/lib/db";
 import { apiFetch } from "@/lib/env";
-import { isLockedMilestoneStatus } from "@/lib/evidence-rules";
+import {
+  fieldMilestoneStepLabel,
+  isLockedMilestoneStatus,
+  isPaidCompletedMilestoneStatus,
+  resolveCurrentFieldMilestone,
+  sortMilestonesByOrder,
+} from "@/lib/evidence-rules";
 import {
   applyPendingAttendanceOverlay,
   discardSyncItem,
@@ -17,9 +23,16 @@ import {
   retrySyncItem,
   saveAttendanceCache,
 } from "@/lib/sync-engine";
-import { getDeviceId, getCurrentPosition, getLocalDateStringClient, cloudinaryAvatarUrl, getInitials } from "@/lib/utils";
+import {
+  getDeviceId,
+  getCurrentPosition,
+  getLocalDateStringClient,
+  formatDeviceDateTime,
+  cloudinaryAvatarUrl,
+  getInitials,
+} from "@/lib/utils";
 import { randomUUID } from "@/lib/crypto";
-import type { LocalMediaRecord, LocalRecord } from "@/lib/types";
+import type { LocalMediaRecord, LocalMilestone, LocalRecord, LocalRecordStatus } from "@/lib/types";
 
 if (typeof window !== "undefined") {
   // Dev-only: expose db in console via window.__navadrishti_db if needed
@@ -28,15 +41,59 @@ if (typeof window !== "undefined") {
   }
 }
 
+function syncStatusLabel(status: LocalRecordStatus | string | null | undefined): string {
+  switch (String(status || "").toLowerCase()) {
+    case "pending":
+      return "Saved locally";
+    case "syncing":
+      return "Uploading";
+    case "synced":
+      return "Uploaded";
+    case "failed":
+      return "Upload failed";
+    default:
+      return String(status || "Unknown");
+  }
+}
+
+function syncStatusHint(status: LocalRecordStatus | string | null | undefined): string {
+  switch (String(status || "").toLowerCase()) {
+    case "pending":
+      return "On this device — not yet confirmed by the server";
+    case "syncing":
+      return "Upload in progress while the app is open";
+    case "synced":
+      return "Server confirmed receipt. Review status is separate from upload.";
+    case "failed":
+      return "Upload failed. Retry while online, or discard and recapture.";
+    default:
+      return "";
+  }
+}
+
+/** Inclusive day span when both campaign dates are present; otherwise null (no fake %). */
+function assignmentDaySpan(item: { start_date?: string | null; end_date?: string | null }) {
+  const start = String(item.start_date || "").slice(0, 10);
+  const end = String(item.end_date || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
+  const startMs = Date.parse(`${start}T00:00:00Z`);
+  const endMs = Date.parse(`${end}T00:00:00Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return null;
+  const total = Math.floor((endMs - startMs) / 86_400_000) + 1;
+  return total > 0 ? total : null;
+}
+
 function UserWelcomeNav({
   name,
   avatarUrl,
+  connectivityReady,
   isOnline,
   isSyncing = false,
   pendingSyncCount = 0,
 }: {
   name: string;
   avatarUrl?: string | null;
+  connectivityReady: boolean;
   isOnline: boolean;
   isSyncing?: boolean;
   pendingSyncCount?: number;
@@ -44,7 +101,13 @@ function UserWelcomeNav({
   const [imageFailed, setImageFailed] = useState(false);
   const displayName = name.trim() || "User";
   const avatarSrc = avatarUrl && !imageFailed ? cloudinaryAvatarUrl(avatarUrl, 88) : null;
-  const statusClass = isSyncing ? "is-syncing" : isOnline ? "is-online" : "is-offline";
+  const statusClass = !connectivityReady
+    ? "is-checking"
+    : isSyncing
+      ? "is-syncing"
+      : isOnline
+        ? "is-online"
+        : "is-offline";
 
   useEffect(() => {
     setImageFailed(false);
@@ -70,12 +133,21 @@ function UserWelcomeNav({
         <div className="field-hub-welcome-copy">
           <p className="field-hub-welcome-label">Welcome</p>
           <p className="field-hub-welcome-name">{displayName}</p>
+          <p className="field-hub-welcome-meta">
+            {!connectivityReady
+              ? "Checking connection…"
+              : isSyncing
+                ? "Uploading stored records…"
+                : isOnline
+                  ? "Online — sync runs while this app is open"
+                  : "Offline — new records stay on this device"}
+          </p>
         </div>
       </div>
 
       {pendingSyncCount > 0 ? (
         <span className="field-hub-sync-badge" aria-live="polite">
-          {pendingSyncCount} awaiting sync
+          {pendingSyncCount} waiting on this device — uploads only while the app stays open
         </span>
       ) : null}
     </section>
@@ -83,20 +155,91 @@ function UserWelcomeNav({
 }
 
 export function FieldConsole() {
-  const { session, sessionLoading, isOnline, isSyncing, lastSync, signOut, syncNow } = useAppContext();
+  const {
+    session,
+    sessionLoading,
+    connectivityReady,
+    isOnline,
+    isSyncing,
+    lastSync,
+    signOut,
+    syncNow,
+  } = useAppContext();
   const [activeTab, setActiveTab] = useState<"evidence" | "attendance">("evidence");
-  const [capturedBlobs, setCapturedBlobs] = useState<{ blob: Blob; url: string; name: string }[]>([]);
+  const [capturedBlobs, setCapturedBlobs] = useState<
+    { blob: Blob; url: string; name: string; proofHash: string }[]
+  >([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitState, setSubmitState] = useState<{ tone: "success" | "error"; message: string } | null>(null);
-  const [deviceId] = useState(() => getDeviceId());
+  const [deviceId, setDeviceId] = useState("");
   const [activePreviewUrl, setActivePreviewUrl] = useState<string | null>(null);
 
+  useEffect(() => {
+    setDeviceId(getDeviceId());
+  }, []);
+
   const canEvidence = session?.role === "ngo";
-  const canAttendance = session?.role === "ngo" || session?.role === "individual";
+  const isIndividual = session?.role === "individual";
+  /** NGO leads with no volunteer/skill assignments never see Attendance. */
+  const [ngoAttendanceEligible, setNgoAttendanceEligible] = useState(false);
+  const canAttendance = isIndividual || (canEvidence && ngoAttendanceEligible);
 
   useEffect(() => {
-    if (session?.role === "individual") setActiveTab("attendance");
-  }, [session?.role]);
+    if (isIndividual) setActiveTab("attendance");
+    else setActiveTab("evidence");
+  }, [isIndividual]);
+
+  useEffect(() => {
+    if (!canEvidence || !session?.id) {
+      setNgoAttendanceEligible(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const countItems = (lists: {
+        activeCampaigns?: unknown[];
+        historyCampaigns?: unknown[];
+        activeSkills?: unknown[];
+        historySkills?: unknown[];
+      }) => {
+        const skills = [...(lists.activeSkills || []), ...(lists.historySkills || [])].filter(
+          (item: any) => !item?.kind || item.kind === "skill_service"
+        );
+        return (
+          (lists.activeCampaigns?.length || 0) +
+          (lists.historyCampaigns?.length || 0) +
+          skills.length
+        );
+      };
+      try {
+        const cached = await readAttendanceCache(session.id);
+        if (!cancelled && cached && countItems(cached) > 0) setNgoAttendanceEligible(true);
+        if (!navigator.onLine) return;
+        const res = await apiFetch("/api/attendance/assignments");
+        const data = await res.json();
+        if (cancelled || !res.ok || !data?.ok) return;
+        const active = data.data?.active || {};
+        const history = data.data?.history || {};
+        const lists = {
+          activeCampaigns: active.campaignItems || data.data?.campaignItems || [],
+          historyCampaigns: history.campaignItems || [],
+          activeSkills: active.skillItems || data.data?.skillItems || [],
+          historySkills: history.skillItems || [],
+        };
+        await saveAttendanceCache(session.id, lists);
+        if (!cancelled) setNgoAttendanceEligible(countItems(lists) > 0);
+      } catch {
+        /* keep prior eligibility */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [canEvidence, session?.id, isOnline]);
+
+  useEffect(() => {
+    if (!canAttendance && activeTab === "attendance") setActiveTab("evidence");
+  }, [canAttendance, activeTab]);
 
   // Camera State
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -104,6 +247,12 @@ export function FieldConsole() {
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraLoading, setCameraLoading] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [evidenceCoords, setEvidenceCoords] = useState<{
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+  } | null>(null);
+  const [evidenceLocating, setEvidenceLocating] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
 
   // Shared Queries (Isolated by Logged-in User)
@@ -119,18 +268,52 @@ export function FieldConsole() {
   }, [session?.id], []);
 
   const stats = useLiveQuery(async () => {
-    if (!session?.id) return { pending: 0, synced: 0, mediaCount: 0 };
+    if (!session?.id) {
+      return { pending: 0, syncing: 0, failed: 0, synced: 0, mediaAwaitingUpload: 0 };
+    }
     const all = await db.recordsLocal.where("userId").equals(session.id).toArray();
-    const mediaCount = await db.mediaLocal
-      .where("recordId")
-      .anyOf(all.map((record) => record.id))
-      .count();
+    const awaitingIds = all
+      .filter((row) => row.status === "pending" || row.status === "syncing" || row.status === "failed")
+      .map((record) => record.id);
+    const mediaAwaitingUpload =
+      awaitingIds.length === 0
+        ? 0
+        : await db.mediaLocal.where("recordId").anyOf(awaitingIds).count();
     return {
-      pending: all.filter(r => r.status === "pending" || r.status === "syncing").length,
-      synced: all.filter(r => r.status === "synced").length,
-      mediaCount
+      pending: all.filter((r) => r.status === "pending").length,
+      syncing: all.filter((r) => r.status === "syncing").length,
+      failed: all.filter((r) => r.status === "failed").length,
+      synced: all.filter((r) => r.status === "synced").length,
+      mediaAwaitingUpload,
     };
-  }, [session?.id], { pending: 0, synced: 0, mediaCount: 0 });
+  }, [session?.id], {
+    pending: 0,
+    syncing: 0,
+    failed: 0,
+    synced: 0,
+    mediaAwaitingUpload: 0,
+  });
+
+  const milestoneOverview = useLiveQuery(async () => {
+    const all = await db.milestones.toArray();
+    const count = (status: string) =>
+      all.filter((row) => String(row.status || "").toLowerCase() === status).length;
+    return {
+      total: all.length,
+      open: count("pending") + count("rejected"),
+      awaitingReview: count("submitted"),
+      approved: count("approved"),
+      completed: count("completed"),
+      rejected: count("rejected"),
+    };
+  }, [], {
+    total: 0,
+    open: 0,
+    awaitingReview: 0,
+    approved: 0,
+    completed: 0,
+    rejected: 0,
+  });
 
   const pendingSyncCount = useLiveQuery(async () => {
     if (!session?.id) return 0;
@@ -176,10 +359,11 @@ export function FieldConsole() {
     setCameraReady(false);
   }, []);
 
-  const startCamera = async () => {
+  const startCamera = useCallback(async () => {
     setCameraLoading(true);
     setCameraError(null);
     try {
+      stopCamera();
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
       if (!videoRef.current) {
         stream.getTracks().forEach((track) => track.stop());
@@ -198,22 +382,64 @@ export function FieldConsole() {
     } finally {
       setCameraLoading(false);
     }
-  };
+  }, [stopCamera]);
 
   const capturePhoto = async (contextLabel: string) => {
     if (!videoRef.current || !canvasRef.current || !cameraReady) return;
     const canvas = canvasRef.current;
     const context = canvas.getContext("2d");
     if (!context) return;
-    canvas.width = videoRef.current.videoWidth;
-    canvas.height = videoRef.current.videoHeight;
-    context.drawImage(videoRef.current, 0, 0);
-    context.font = "24px monospace"; context.fillStyle = "yellow";
-    context.fillText(new Date().toLocaleString(), 20, canvas.height - 40);
-    context.fillText(contextLabel.slice(0, 30), 20, canvas.height - 70);
-    canvas.toBlob(blob => {
-      if (blob) setCapturedBlobs(p => [...p, { blob, url: URL.createObjectURL(blob), name: `cap-${Date.now()}.jpg` }]);
-    }, "image/jpeg", 0.9);
+
+    let coords = evidenceCoords;
+    if (!coords) {
+      coords = await getCurrentPosition();
+      if (coords) setEvidenceCoords(coords);
+    }
+    if (!coords) {
+      setCameraError("Location is required. Enable GPS and try again.");
+      return;
+    }
+
+    canvas.width = videoRef.current.videoWidth || 1280;
+    canvas.height = videoRef.current.videoHeight || 720;
+    context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+
+    const stampTime = new Date().toLocaleString();
+    const todayLabel = getLocalDateStringClient();
+    const lat = coords.latitude.toFixed(6);
+    const lng = coords.longitude.toFixed(6);
+    context.fillStyle = "rgba(0,0,0,0.45)";
+    context.fillRect(0, canvas.height - 110, canvas.width, 110);
+    context.font = "bold 22px monospace";
+    context.fillStyle = "#fde047";
+    context.fillText(stampTime, 16, canvas.height - 72);
+    context.fillText(`DATE ${todayLabel}`, 16, canvas.height - 44);
+    context.fillText(`GPS ${lat}, ${lng}`, 16, canvas.height - 16);
+    context.font = "16px monospace";
+    context.fillText((contextLabel || "Evidence").slice(0, 42), 16, canvas.height - 96);
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92)
+    );
+    if (!blob) {
+      setCameraError("Could not seal photo.");
+      return;
+    }
+    const proofHash = await calculateHash(blob);
+    if (!/^[a-f0-9]{64}$/i.test(proofHash)) {
+      setCameraError("Could not seal photo integrity hash.");
+      return;
+    }
+    setCapturedBlobs((prev) => [
+      ...prev,
+      {
+        blob,
+        url: URL.createObjectURL(blob),
+        name: `cap-${Date.now()}.jpg`,
+        proofHash: proofHash.toLowerCase(),
+      },
+    ]);
+    setCameraError(null);
   };
 
   useEffect(() => { return () => stopCamera(); }, [stopCamera]);
@@ -221,6 +447,31 @@ export function FieldConsole() {
   useEffect(() => {
     if (activeTab === "attendance") stopCamera();
   }, [activeTab, stopCamera]);
+
+  // Evidence view: lock GPS then auto-open camera (no manual Open Camera control).
+  const showEvidenceCapture = canEvidence && (activeTab === "evidence" || !canAttendance);
+  useEffect(() => {
+    if (!showEvidenceCapture) return;
+    let cancelled = false;
+    (async () => {
+      setEvidenceLocating(true);
+      setCameraError(null);
+      const position = await getCurrentPosition();
+      if (cancelled) return;
+      if (!position) {
+        setEvidenceCoords(null);
+        setEvidenceLocating(false);
+        setCameraError("Location is required. Enable GPS and try again.");
+        return;
+      }
+      setEvidenceCoords(position);
+      setEvidenceLocating(false);
+      await startCamera();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showEvidenceCapture, startCamera]);
 
   const capturedUrlsRef = useRef<string[]>([]);
   capturedUrlsRef.current = capturedBlobs.map((item) => item.url);
@@ -249,29 +500,39 @@ export function FieldConsole() {
     setSubmitState(null);
 
     try {
-      const coords = await getCurrentPosition();
+      const resolvedDeviceId = deviceId || getDeviceId();
+      if (!deviceId) setDeviceId(resolvedDeviceId);
+
+      const coords = evidenceCoords || (await getCurrentPosition());
       if (!coords) throw new Error("Could not acquire GPS signal. Check permissions.");
+      if (!evidenceCoords) setEvidenceCoords(coords);
 
       const recordId = randomUUID();
       const createdAt = new Date().toISOString();
 
-      const mediaEntries: LocalMediaRecord[] = await Promise.all(
-        capturedBlobs.map(async (item) => ({
+      const mediaEntries: LocalMediaRecord[] = [];
+      for (const item of capturedBlobs) {
+        const sealedHash = String(item.proofHash || "").toLowerCase();
+        const actualHash = (await calculateHash(item.blob)).toLowerCase();
+        if (!/^[a-f0-9]{64}$/.test(sealedHash) || sealedHash !== actualHash) {
+          throw new Error("Photo integrity check failed. Recapture and try again.");
+        }
+        mediaEntries.push({
           id: randomUUID(),
           recordId,
           fileName: item.name,
-          mimeType: item.blob.type,
+          mimeType: item.blob.type || "image/jpeg",
           size: item.blob.size,
-          kind: "image" as const,
+          kind: "image",
           blob: item.blob,
-          proofHash: await calculateHash(item.blob),
+          proofHash: sealedHash,
           createdAt,
-        }))
-      );
+        });
+      }
 
       const record: LocalRecord = {
         id: recordId,
-        deviceId,
+        deviceId: resolvedDeviceId,
         userId: session.id,
         userName: session.name,
         projectId: data.projectId,
@@ -313,7 +574,12 @@ export function FieldConsole() {
 
       capturedBlobs.forEach((item) => URL.revokeObjectURL(item.url));
       setCapturedBlobs([]);
-      setSubmitState({ tone: "success", message: "Evidence saved. It will sync when you are online." });
+      setSubmitState({
+        tone: "success",
+        message: isOnline
+          ? "Evidence saved on this device. Upload runs while the app stays open and online."
+          : "Evidence saved on this device. It will upload when the app is open and online.",
+      });
       if (isOnline) await syncNow();
     } catch (error) {
       setSubmitState({ tone: "error", message: error instanceof Error ? error.message : "Submission failed." });
@@ -346,6 +612,7 @@ export function FieldConsole() {
       <UserWelcomeNav
         name={session?.ngoName || session?.name || "User"}
         avatarUrl={session?.avatarUrl}
+        connectivityReady={connectivityReady}
         isOnline={isOnline}
         isSyncing={isSyncing}
         pendingSyncCount={pendingSyncCount}
@@ -378,10 +645,15 @@ export function FieldConsole() {
 
       <div className="field-hub-body">
       {showAttendance ? (
-        <AttendancePanel showSkillSection={session?.role === "ngo"} />
+        <AttendancePanel showSkillSection />
       ) : (
         <>
-          <section className="card-section">
+          <section className="card-section field-overview" aria-label="Field overview">
+            <span className="section-title">Overview</span>
+            <p className="field-overview-copy">
+              Evidence is sealed on this device first. Upload confirmation is not the same as milestone
+              review or approval.
+            </p>
             <div className="chips-row">
               {statsLoading ? (
                 <>
@@ -392,18 +664,72 @@ export function FieldConsole() {
               ) : (
                 <>
                   <div className="chip">
-                    <div className={`chip-dot ${isSyncing ? "dot-syncing" : isOnline ? "dot-online" : "dot-offline"}`} />
-                    {isSyncing ? "Syncing…" : isOnline ? "Server Live" : "Local Only"}
+                    <div
+                      className={`chip-dot ${
+                        !connectivityReady
+                          ? "dot-checking"
+                          : isSyncing
+                            ? "dot-syncing"
+                            : isOnline
+                              ? "dot-online"
+                              : "dot-offline"
+                      }`}
+                    />
+                    {!connectivityReady
+                      ? "Checking…"
+                      : isSyncing
+                        ? "Uploading…"
+                        : isOnline
+                          ? "Online"
+                          : "Offline — local only"}
                   </div>
-                  <div className="chip">
-                    <span className="badge badge-slate">Queue</span> {stats.pending}
+                  <div className="chip" title="Saved locally — waiting to upload">
+                    <span className="badge badge-slate">Local queue</span>{" "}
+                    {stats.pending + stats.syncing}
                   </div>
-                  <div className="chip">
-                    <span className="badge badge-blue">Media</span> {stats.mediaCount}
+                  <div className="chip" title="Upload failed — needs retry or discard">
+                    <span className="badge badge-amber">Failed</span> {stats.failed}
+                  </div>
+                  <div className="chip" title="Server confirmed upload">
+                    <span className="badge badge-blue">Uploaded</span> {stats.synced}
+                  </div>
+                  <div className="chip" title="Local photo blobs still waiting to upload">
+                    <span className="badge badge-slate">Photos queued</span> {stats.mediaAwaitingUpload}
                   </div>
                 </>
               )}
             </div>
+
+            {milestoneOverview.total > 0 ? (
+              <div className="field-overview-milestones" aria-label="Milestone review status">
+                <div className="field-overview-stat">
+                  <strong>{milestoneOverview.open}</strong>
+                  <span>Open / redo</span>
+                </div>
+                <div className="field-overview-stat">
+                  <strong>{milestoneOverview.awaitingReview}</strong>
+                  <span>Awaiting review</span>
+                </div>
+                <div className="field-overview-stat">
+                  <strong>{milestoneOverview.approved}</strong>
+                  <span>Approved</span>
+                </div>
+                <div className="field-overview-stat">
+                  <strong>{milestoneOverview.rejected}</strong>
+                  <span>Rejected</span>
+                </div>
+              </div>
+            ) : (
+              <p className="field-overview-empty">
+                No project milestones on this device yet. Sync while online to refresh assignments.
+              </p>
+            )}
+
+            {stats.failed > 0 ? (
+              <p className="field-overview-attention" role="status">
+                {stats.failed} evidence record{stats.failed === 1 ? "" : "s"} need attention below.
+              </p>
+            ) : null}
           </section>
 
           <NgoCaptureView
@@ -415,6 +741,8 @@ export function FieldConsole() {
             cameraReady={cameraReady}
             cameraLoading={cameraLoading}
             cameraError={cameraError}
+            evidenceCoords={evidenceCoords}
+            evidenceLocating={evidenceLocating}
             startCamera={startCamera}
             stopCamera={stopCamera}
             capturePhoto={capturePhoto}
@@ -424,7 +752,10 @@ export function FieldConsole() {
           />
 
           <section className="card-section">
-            <span className="section-title">Recent Device History</span>
+            <span className="section-title">Recent device history</span>
+            <p className="field-overview-copy">
+              Status below is upload state on this device, not platform approval.
+            </p>
             <div style={{ display: "grid", gap: "8px" }}>
               {recordsLoading ? (
                 <>
@@ -433,22 +764,33 @@ export function FieldConsole() {
                   <Skeleton className="skeleton-ledger" />
                 </>
               ) : records.length === 0 ? (
-                <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: "0.8rem" }}>
-                  No local records found.
+                <p className="field-empty-state">
+                  No evidence sealed on this device yet. Capture photos and submit to create a local record.
                 </p>
               ) : (
-                records.slice(0, 5).map((r) => (
+                records.slice(0, 8).map((r) => (
                   <div key={r.id} className="ledger-item" style={{ flexDirection: "column", alignItems: "stretch" }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
                       <div className="ledger-info">
-                        <div className="ledger-title">{r.beneficiaryName || "Evidence Record"}</div>
-                        <div className="ledger-meta">{r.projectName} • {new Date(r.submittedAtDevice).toLocaleTimeString()}</div>
+                        <div className="ledger-title">{r.beneficiaryName || "Evidence record"}</div>
+                        <div className="ledger-meta">
+                          {r.projectName} · {formatDeviceDateTime(r.submittedAtDevice)}
+                        </div>
+                        <div className="ledger-meta">{syncStatusHint(r.status)}</div>
                       </div>
-                      <div className={`status-badge status-${r.status}`}>{r.status}</div>
+                      <div className={`status-badge status-${r.status}`} title={syncStatusHint(r.status)}>
+                        {syncStatusLabel(r.status)}
+                      </div>
                     </div>
-                    <LedgerItemMedia media={r.media} onPreview={setActivePreviewUrl} />
+                    {r.media.length > 0 ? (
+                      <LedgerItemMedia media={r.media} onPreview={setActivePreviewUrl} />
+                    ) : r.status === "synced" ? (
+                      <p className="ledger-meta" style={{ marginTop: 6 }}>
+                        Local photos removed after server confirmation.
+                      </p>
+                    ) : null}
                     {r.status === "failed" ? (
-                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <div className="ledger-actions">
                         <span className="ledger-meta">{r.lastError || "Sync failed."}</span>
                         <button type="button" className="btn-outline" onClick={() => void handleRetryRecord(r.id)}>
                           Retry
@@ -457,6 +799,10 @@ export function FieldConsole() {
                           Discard
                         </button>
                       </div>
+                    ) : r.status === "pending" || r.status === "syncing" ? (
+                      <p className="ledger-meta" style={{ marginTop: 6 }}>
+                        Waiting to upload — keep the app open while online.
+                      </p>
                     ) : null}
                   </div>
                 ))
@@ -519,7 +865,7 @@ export function FieldConsole() {
 }
 
 function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boolean }) {
-  const { session, isOnline, syncNow } = useAppContext();
+  const { session, connectivityReady, isOnline, isSyncing, syncNow } = useAppContext();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [bucket, setBucket] = useState<"active" | "history">("active");
@@ -539,6 +885,18 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
             .where("userId")
             .equals(session.id)
             .filter((row) => row.status === "failed")
+            .toArray()
+        : [],
+    [session?.id],
+    []
+  );
+  const pendingAttendance = useLiveQuery(
+    async () =>
+      session?.id
+        ? db.attendanceOutbox
+            .where("userId")
+            .equals(session.id)
+            .filter((row) => row.status === "pending" || row.status === "syncing")
             .toArray()
         : [],
     [session?.id],
@@ -613,24 +971,36 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
   }, [load, isOnline]);
 
   const campaignItems = bucket === "active" ? activeCampaigns : historyCampaigns;
-  const skillItems = bucket === "active" ? activeSkills : historySkills;
+  const skillItems = (bucket === "active" ? activeSkills : historySkills).filter(
+    (item) => item.kind === "skill_service"
+  );
+  const activeSkillCount = activeSkills.filter((item) => item.kind === "skill_service").length;
+  const historySkillCount = historySkills.filter((item) => item.kind === "skill_service").length;
   const isHistory = bucket === "history";
-  // Individuals see this section only when they hired a daily service they need to mark.
-  const showSkills = showSkillSection || activeSkills.length + historySkills.length > 0;
+  const hasCampaignSection = campaignItems.length > 0;
+  const hasSkillSection = showSkillSection && skillItems.length > 0;
+  const totalActive = activeCampaigns.length + activeSkillCount;
+  const totalHistory = historyCampaigns.length + historySkillCount;
 
   const markedToday = (summary: any) =>
     String(summary?.last_attendance_at || "") === getLocalDateStringClient();
   const daysPresent = (summary: any) =>
     Number(summary?.days_attended ?? summary?.total_entries ?? 0);
   const volunteerCount = (item: any) => Math.max(1, Number(item.volunteer_capacity) || 1);
+  const todayLabel = getLocalDateStringClient();
+  const markedTodayCount = [...activeCampaigns, ...activeSkills].filter((item) =>
+    markedToday(item.attendance_summary)
+  ).length;
+  const pendingSyncLocal = pendingAttendance?.length || 0;
+  const failedLocal = failedAttendance?.length || 0;
 
   function openCapture(item: any, mode: "selfie" | "photo") {
     if (!item.assignment_id || !item.can_mark) return;
     if (markedToday(item.attendance_summary)) {
       setMessage(
         item.attendance_summary?.pending_sync
-          ? "Today's attendance is saved on this device and will sync when online."
-          : "Today's attendance is already marked and cannot be changed."
+          ? "Today's attendance is saved on this device and will upload while the app stays open and online."
+          : "Today's attendance is already marked on the server and cannot be changed."
       );
       return;
     }
@@ -666,32 +1036,94 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
 
   return (
     <div className="attendance-console">
+      <section className="card-section field-overview" aria-label="Attendance overview">
+        <span className="section-title">Overview</span>
+        <p className="field-overview-copy">
+          Attendance day {todayLabel} (IST). Marks save on this device first; server confirmation is
+          separate from a local pending upload.
+        </p>
+        <div className="field-overview-milestones">
+          <div className="field-overview-stat">
+            <strong>{totalActive}</strong>
+            <span>Active assignments</span>
+          </div>
+          <div className="field-overview-stat">
+            <strong>{markedTodayCount}</strong>
+            <span>Marked today</span>
+          </div>
+          <div className="field-overview-stat">
+            <strong>{pendingSyncLocal}</strong>
+            <span>Waiting to upload</span>
+          </div>
+          <div className="field-overview-stat">
+            <strong>{failedLocal}</strong>
+            <span>Needs retry</span>
+          </div>
+        </div>
+        <div className="chips-row" style={{ marginTop: 10 }}>
+          <div className="chip">
+            <div
+              className={`chip-dot ${
+                !connectivityReady
+                  ? "dot-checking"
+                  : isSyncing
+                    ? "dot-syncing"
+                    : isOnline
+                      ? "dot-online"
+                      : "dot-offline"
+              }`}
+            />
+            {!connectivityReady
+              ? "Checking…"
+              : isSyncing
+                ? "Uploading…"
+                : isOnline
+                  ? "Online"
+                  : "Offline — local only"}
+          </div>
+          <button
+            type="button"
+            className="btn-outline chip-action"
+            onClick={() => void syncNow()}
+            disabled={!isOnline || isSyncing || pendingSyncLocal + failedLocal === 0}
+          >
+            Sync now
+          </button>
+        </div>
+      </section>
+
       {error ? <div className="form-error">{error}</div> : null}
       {message ? <div className="attendance-banner">{message}</div> : null}
       {failedAttendance?.length ? (
         <section className="card-section" aria-label="Failed attendance uploads">
           <span className="section-title">Attendance needing attention</span>
+          <p className="field-overview-copy">
+            Failed uploads stay on this device until retry succeeds or you discard them. Retry does not
+            create a second mark for the same day.
+          </p>
           {failedAttendance.map((row) => (
-            <div key={row.id} className="ledger-item" style={{ alignItems: "center", gap: "8px" }}>
+            <div key={row.id} className="ledger-item ledger-actions-row">
               <div className="ledger-info">
                 <div className="ledger-title">{row.title || "Attendance mark"}</div>
                 <div className="ledger-meta">
-                  {row.attendanceDate} · {row.lastError || "Upload failed."}
+                  {row.attendanceDate} · {syncStatusLabel(row.status)} · {row.lastError || "Upload failed."}
                 </div>
               </div>
-              <button type="button" className="btn-outline" onClick={() => void retryAttendance(row.id)}>
-                Retry
-              </button>
-              <button type="button" className="btn-outline" onClick={() => void discardAttendance(row.id)}>
-                Discard
-              </button>
+              <div className="ledger-actions">
+                <button type="button" className="btn-outline" onClick={() => void retryAttendance(row.id)}>
+                  Retry
+                </button>
+                <button type="button" className="btn-outline" onClick={() => void discardAttendance(row.id)}>
+                  Discard
+                </button>
+              </div>
             </div>
           ))}
         </section>
       ) : null}
-      {!isOnline ? (
+      {connectivityReady && !isOnline ? (
         <div className="attendance-banner">
-          Offline mode — marks are saved on this device and sync under your login when internet returns.
+          Offline — marks stay on this device and upload under your login while the app is open and online.
         </div>
       ) : null}
 
@@ -702,9 +1134,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
           onClick={() => setBucket("active")}
         >
           Active
-          <span className="attendance-count">
-            {activeCampaigns.length + (showSkills ? activeSkills.length : 0)}
-          </span>
+          <span className="attendance-count">{totalActive}</span>
         </button>
         <button
           type="button"
@@ -712,29 +1142,30 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
           onClick={() => setBucket("history")}
         >
           History
-          <span className="attendance-count">
-            {historyCampaigns.length + (showSkills ? historySkills.length : 0)}
-          </span>
+          <span className="attendance-count">{totalHistory}</span>
         </button>
       </nav>
 
-      <section className="field-section">
-        <div className="section-heading">
-          <h2>{isHistory ? "Past CSR campaigns" : "Active CSR campaigns"}</h2>
-          <p className="subtle">
-            {isHistory
-              ? "Campaigns you participated in that have ended or were cancelled."
-              : "Mark yourself present once per day with a sealed selfie (up to 3 photos). For volunteer NGOs only — lead NGOs coordinate the campaign and do not self-mark."}
-          </p>
-        </div>
-        {campaignItems.length === 0 ? (
-          <p className="subtle">
-            {isHistory ? "No past campaign projects yet." : "No active campaign projects yet."}
-          </p>
-        ) : (
+      {!hasCampaignSection && !hasSkillSection ? (
+        <p className="field-empty-state">
+          {isHistory
+            ? "No past attendance assignments on this device."
+            : "No active attendance assignments. Go online once to refresh your list."}
+        </p>
+      ) : null}
+
+      {hasCampaignSection ? (
+        <section className="field-section">
+          <div className="section-heading">
+            <h2>{isHistory ? "Past campaigns" : "Campaigns"}</h2>
+          </div>
           <div className="attendance-list">
             {campaignItems.map((item) => {
               const marked = markedToday(item.attendance_summary);
+              const pendingLocal = Boolean(item.attendance_summary?.pending_sync);
+              const days = daysPresent(item.attendance_summary);
+              const span = assignmentDaySpan(item);
+              const remaining = span != null ? Math.max(0, span - days) : null;
               return (
                 <article key={`${item.assignment_id || "x"}-${item.title}`} className="attendance-card">
                   <div>
@@ -743,7 +1174,7 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                     {item.location ? <p className="subtle">{item.location}</p> : null}
                   </div>
                   <div className="attendance-meta">
-                    <span>Days attended: {daysPresent(item.attendance_summary)}</span>
+                    <span>Days attended: {days}</span>
                     <span>
                       Counts as: {volunteerCount(item)} {volunteerCount(item) === 1 ? "person" : "people"}
                     </span>
@@ -755,8 +1186,27 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                         {item.start_date || "—"} → {item.end_date || "—"}
                       </span>
                     ) : null}
-                    <span>Last marked: {item.attendance_summary?.last_attendance_at || "Not yet"}</span>
+                    <span>
+                      Last marked: {item.attendance_summary?.last_attendance_at || "Not yet"}
+                      {pendingLocal ? " · Saved locally (not uploaded yet)" : ""}
+                    </span>
                   </div>
+                  {span != null ? (
+                    <div className="field-progress" aria-label={`Attendance progress ${days} of ${span} days`}>
+                      <div className="field-progress-meta">
+                        <span>
+                          {days} of {span} campaign days
+                        </span>
+                        <span>{remaining} remaining</span>
+                      </div>
+                      <div className="field-progress-track" role="presentation">
+                        <div
+                          className="field-progress-fill"
+                          style={{ width: `${Math.min(100, Math.round((days / span) * 100))}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
                   {!isHistory ? (
                     <button
                       type="button"
@@ -765,83 +1215,80 @@ function AttendancePanel({ showSkillSection = true }: { showSkillSection?: boole
                       onClick={() => openCapture(item, "selfie")}
                     >
                       {marked
-                        ? "Today already marked"
+                        ? pendingLocal
+                          ? "Today saved locally"
+                          : "Today already marked"
                         : !item.can_mark
                           ? item.mark_blocked_reason || "Attendance is not open"
-                          : "Take selfie & mark"}
+                          : "Mark attendance"}
                     </button>
                   ) : null}
                 </article>
               );
             })}
           </div>
-        )}
-      </section>
+        </section>
+      ) : null}
 
-      {showSkills ? (
+      {hasSkillSection ? (
         <section className="field-section">
           <div className="section-heading">
-            <h2>{isHistory ? "Past daily services" : "Daily services"}</h2>
-            <p className="subtle">
-              {isHistory
-                ? "Completed or cancelled skill needs and hired services."
-                : "Mark the person working for you present once per day with sealed photos (up to 3). Each mark is stamped with date, time and location, adds one day to what you owe, and cannot be edited."}
-            </p>
+            <h2>{isHistory ? "Past skills" : "Skills"}</h2>
           </div>
-          {skillItems.length === 0 ? (
-            <p className="subtle">
-              {isHistory
-                ? "No past daily services."
-                : "No daily services to mark right now."}
-            </p>
-          ) : (
-            <div className="attendance-list">
-              {skillItems.map((item) => {
-                const marked = markedToday(item.attendance_summary);
-                const summary = item.attendance_summary || {};
-                return (
-                  <article key={item.assignment_id} className="attendance-card">
-                    <div>
-                      <h3>{item.title}</h3>
-                      <p className="subtle">
-                        {item.kind === "service_offer" ? "Provider: " : ""}
-                        {item.subtitle}
-                        {item.assignee_email ? ` · ${item.assignee_email}` : ""}
-                      </p>
-                    </div>
-                    <div className="attendance-meta">
-                      <span>
-                        Daily rate:{" "}
-                        {item.daily_rate > 0
-                          ? `INR ${Number(item.daily_rate).toLocaleString("en-IN")}`
-                          : "Not set"}
-                      </span>
-                      <span>Days present: {daysPresent(summary)}</span>
-                      <span>
-                        Unpaid: INR{" "}
-                        {Math.max(0, Number(summary.total_due || 0) - Number(summary.paid_total || 0)).toLocaleString("en-IN")}
-                      </span>
-                      <span>Last marked: {summary.last_attendance_at || "Not yet"}</span>
-                    </div>
-                    {!isHistory ? (
-                      <button
-                        type="button"
-                        className="btn-attendance-mark"
-                        disabled={!item.can_mark || marked}
-                        onClick={() => openCapture(item, "photo")}
-                      >
-                        {marked
-                          ? "Today already marked"
-                          : !item.can_mark
-                            ? item.mark_blocked_reason || "Attendance is not open"
-                            : "Capture photo & mark"}
-                      </button>
-                    ) : null}
-                  </article>
-                );
-              })}
-            </div>
-          )}
+          <div className="attendance-list">
+            {skillItems.map((item) => {
+              const marked = markedToday(item.attendance_summary);
+              const pendingLocal = Boolean(item.attendance_summary?.pending_sync);
+              const summary = item.attendance_summary || {};
+              return (
+                <article key={item.assignment_id} className="attendance-card">
+                  <div>
+                    <h3>{item.title}</h3>
+                    <p className="subtle">
+                      {item.subtitle}
+                      {item.assignee_email ? ` · ${item.assignee_email}` : ""}
+                    </p>
+                  </div>
+                  <div className="attendance-meta">
+                    <span>
+                      Daily rate:{" "}
+                      {item.daily_rate > 0
+                        ? `INR ${Number(item.daily_rate).toLocaleString("en-IN")}`
+                        : "Not set"}
+                    </span>
+                    <span>Days present: {daysPresent(summary)}</span>
+                    <span>
+                      Unpaid: INR{" "}
+                      {Math.max(
+                        0,
+                        Number(summary.total_due || 0) - Number(summary.paid_total || 0)
+                      ).toLocaleString("en-IN")}
+                    </span>
+                    <span>
+                      Last marked: {summary.last_attendance_at || "Not yet"}
+                      {pendingLocal ? " · Saved locally (not uploaded yet)" : ""}
+                    </span>
+                  </div>
+                  {!isHistory ? (
+                    <button
+                      type="button"
+                      className="btn-attendance-mark"
+                      disabled={!item.can_mark || marked}
+                      onClick={() => openCapture(item, "photo")}
+                    >
+                      {marked
+                        ? pendingLocal
+                          ? "Today saved locally"
+                          : "Today already marked"
+                        : !item.can_mark
+                          ? item.mark_blocked_reason || "Attendance is not open"
+                          : "Mark attendance"}
+                    </button>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
         </section>
       ) : null}
 
@@ -1064,8 +1511,8 @@ function AttendanceCaptureSheet(props: {
       }
 
       const offlineNote = props.isOnline
-        ? ""
-        : " Saved on this device — will upload under your login when internet returns.";
+        ? " Saved on this device; upload runs while the app stays open and online."
+        : " Saved on this device — will upload under your login when the app is open and online.";
 
       await props.onMarked(
         isSelfie
@@ -1094,21 +1541,15 @@ function AttendanceCaptureSheet(props: {
           </button>
         </header>
 
-        <p className="subtle attendance-capture-hint">
-          Up to {ATTENDANCE_MAX_PHOTOS} photos. Once taken, photos are locked (not removable). Each
-          frame is stamped with date, time and GPS. Today&apos;s attendance cannot be edited after
-          submit.
-        </p>
-
-        {locating ? (
+        {locating || cameraLoading ? (
           <div className="skeleton-inline-row" aria-busy="true">
             <Skeleton className="skeleton-line-sm" />
-            <span className="sr-only">Acquiring GPS</span>
+            <span className="sr-only">{locating ? "Acquiring GPS" : "Opening camera"}</span>
           </div>
         ) : null}
         {coords ? (
           <p className="attendance-capture-gps">
-            GPS locked · {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} · {todayLabel}
+            GPS · {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} · {todayLabel}
           </p>
         ) : null}
 
@@ -1134,22 +1575,17 @@ function AttendanceCaptureSheet(props: {
         <div className="attendance-capture-actions">
           <button
             type="button"
-            className="btn-outline"
-            onClick={() => void startCamera()}
-            disabled={submitting || locating || !coords}
-          >
-            {cameraReady ? "Restart camera" : "Open camera"}
-          </button>
-          <button
-            type="button"
             className="btn-primary"
             onClick={() => void captureSealedPhoto()}
             disabled={
               submitting || !cameraReady || !coords || photos.length >= ATTENDANCE_MAX_PHOTOS
             }
           >
-            {isSelfie ? "Capture selfie" : "Capture photo"} ({photos.length}/{ATTENDANCE_MAX_PHOTOS})
+            Capture
           </button>
+          <div className="capture-count" aria-live="polite">
+            {photos.length}<span>/{ATTENDANCE_MAX_PHOTOS}</span>
+          </div>
         </div>
 
         {photos.length > 0 ? (
@@ -1181,15 +1617,50 @@ function AttendanceCaptureSheet(props: {
 
 function NgoCaptureView(props: any) {
   const { isSyncing } = useAppContext();
-  const [beneficiaryName, setBeneficiaryName] = useState("");
+  const [officerName, setOfficerName] = useState("");
   const [notes, setNotes] = useState("");
-  const [interactionType, setInteractionType] = useState("visit");
 
   const milestones = useLiveQuery(() => db.milestones.orderBy("milestoneOrder").toArray(), [], []);
-  const activeMilestone = useMemo(() => {
-    if (!milestones || milestones.length === 0) return null;
-    return milestones.find((m) => !isLockedMilestoneStatus(m.status)) || milestones[milestones.length - 1];
+
+  const projectMilestones = useMemo(() => {
+    if (!milestones?.length) return [] as LocalMilestone[];
+    const byProject = new Map<string, LocalMilestone[]>();
+    for (const row of milestones) {
+      const list = byProject.get(row.projectId) || [];
+      list.push(row);
+      byProject.set(row.projectId, list);
+    }
+    // Prefer a project that still has unpaid field progress.
+    for (const list of byProject.values()) {
+      const ordered = sortMilestonesByOrder(list);
+      const current = resolveCurrentFieldMilestone(ordered);
+      if (current && !isPaidCompletedMilestoneStatus(current.status)) return ordered;
+    }
+    const first = byProject.values().next().value as LocalMilestone[] | undefined;
+    return first ? sortMilestonesByOrder(first) : [];
   }, [milestones]);
+
+  const activeMilestone = useMemo(
+    () => resolveCurrentFieldMilestone(projectMilestones),
+    [projectMilestones]
+  );
+
+  const milestoneProgress = useMemo(() => {
+    if (!activeMilestone || projectMilestones.length === 0) {
+      return { past: null as LocalMilestone | null, current: null as LocalMilestone | null, next: null as LocalMilestone | null, index: 0, total: 0 };
+    }
+    const index = Math.max(
+      0,
+      projectMilestones.findIndex((m) => m.id === activeMilestone.id)
+    );
+    return {
+      past: index > 0 ? projectMilestones[index - 1] : null,
+      current: projectMilestones[index] || activeMilestone,
+      next: index < projectMilestones.length - 1 ? projectMilestones[index + 1] : null,
+      index,
+      total: projectMilestones.length,
+    };
+  }, [activeMilestone, projectMilestones]);
 
   if (milestones === undefined || (isSyncing && milestones.length === 0)) {
     return <CardSectionSkeleton rows={4} />;
@@ -1198,62 +1669,126 @@ function NgoCaptureView(props: any) {
   if (!activeMilestone) {
     return (
       <section className="card-section">
-        <span className="section-title">CSR Milestone</span>
-        <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-          No CSR assignments found.
+        <span className="section-title">Milestone info</span>
+        <p className="field-empty-state">
+          No open milestones on this device. Connect online and tap Sync so project assignments can refresh.
         </p>
       </section>
     );
   }
 
   const isLocked = isLockedMilestoneStatus(activeMilestone.status);
-  const statusNote = isLocked
-    ? "Every milestone is approved. There is nothing left to capture."
-    : activeMilestone.status === "submitted"
-      ? "Evidence is with the reviewer. You can still add more."
-      : activeMilestone.status === "rejected"
-        ? "The reviewer asked for new evidence. Capture it again below."
-        : null;
+  const awaitingPayment = String(activeMilestone.status || "").toLowerCase() === "approved";
 
   return (
     <>
       <section className="card-section">
-        <span className="section-title">CSR Milestone</span>
-        <div style={{ fontWeight: 800, fontSize: '1.1rem' }}>{activeMilestone.title}</div>
-        {activeMilestone.description ? (
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{activeMilestone.description}</p>
-        ) : null}
-        {statusNote && <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>{statusNote}</p>}
+        <div className="milestone-progress">
+          <div className="milestone-progress-head">
+            <span className="section-title" style={{ marginBottom: 0 }}>
+              Milestone info
+            </span>
+            <span className="milestone-progress-count">
+              {milestoneProgress.index + 1}/{milestoneProgress.total}
+            </span>
+          </div>
+
+          <ol className="milestone-progress-track" aria-label="Milestone progress">
+            <li className={`milestone-progress-step${milestoneProgress.past ? " is-past" : " is-empty"}`}>
+              <span className="milestone-progress-label">Past</span>
+              <strong>{milestoneProgress.past?.title || "—"}</strong>
+              <span className="milestone-progress-meta">
+                {milestoneProgress.past ? fieldMilestoneStepLabel(milestoneProgress.past.status) : "None"}
+              </span>
+            </li>
+            <li className="milestone-progress-step is-current">
+              <span className="milestone-progress-label">Current</span>
+              <strong>{milestoneProgress.current?.title || activeMilestone.title}</strong>
+              <span className="milestone-progress-meta">{fieldMilestoneStepLabel(activeMilestone.status)}</span>
+            </li>
+            <li className={`milestone-progress-step${milestoneProgress.next ? " is-next" : " is-empty"}`}>
+              <span className="milestone-progress-label">Next</span>
+              <strong>{milestoneProgress.next?.title || "—"}</strong>
+              <span className="milestone-progress-meta">
+                {milestoneProgress.next
+                  ? awaitingPayment
+                    ? "Locked until payment"
+                    : fieldMilestoneStepLabel(milestoneProgress.next.status)
+                  : "End"}
+              </span>
+            </li>
+          </ol>
+          {awaitingPayment ? (
+            <p style={{ marginTop: 10, marginBottom: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+              Evidence for this milestone is approved. The next milestone unlocks after payment is confirmed.
+            </p>
+          ) : null}
+        </div>
       </section>
 
-      <CameraCard {...props} contextLabel={activeMilestone.title} />
+      <CameraCard {...props} contextLabel={activeMilestone.title} disabled={isLocked} />
 
       <section className="card-section">
-        <span className="section-title">Record Details</span>
-        <form onSubmit={e => { e.preventDefault(); props.onSeal({ beneficiaryName, interactionType, notes, projectId: activeMilestone.projectId, projectName: activeMilestone.title, milestoneId: activeMilestone.id, referencePointId: null }); }}>
-          <fieldset disabled={isLocked || props.submitting} style={{ border: 'none' }}>
+        <span className="section-title">Details</span>
+        <p className="field-overview-copy">
+          Seal at least one photo with GPS, then submit. The record stays local until the server confirms
+          upload. Milestone review happens later on the platform.
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            props.onSeal({
+              beneficiaryName: officerName.trim(),
+              interactionType: "visit",
+              notes,
+              projectId: activeMilestone.projectId,
+              projectName: activeMilestone.title,
+              milestoneId: activeMilestone.id,
+              referencePointId: null,
+            });
+          }}
+        >
+          <fieldset disabled={isLocked || props.submitting} style={{ border: "none", padding: 0, margin: 0 }}>
             <div className="form-group">
-              <label>Beneficiary Name</label>
-              <input value={beneficiaryName} onChange={e => setBeneficiaryName(e.target.value)} required placeholder="Full legal name" />
+              <label htmlFor="officer-name">Officer name</label>
+              <input
+                id="officer-name"
+                value={officerName}
+                onChange={(e) => setOfficerName(e.target.value)}
+                required
+                autoComplete="name"
+                placeholder="Field officer full name"
+              />
             </div>
             <div className="form-group">
-              <label>Interaction</label>
-              <select value={interactionType} onChange={e => setInteractionType(e.target.value)}>
-                <option value="visit">Field Visit</option>
-                <option value="distribution">Distribution</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label>Notes</label>
-              <textarea value={notes} onChange={e => setNotes(e.target.value)} required rows={3} />
+              <label htmlFor="evidence-notes">Notes</label>
+              <textarea
+                id="evidence-notes"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                required
+                rows={3}
+                placeholder="What was observed on this field visit"
+              />
             </div>
           </fieldset>
           {props.submitState ? (
-            <div className={props.submitState.tone === "error" ? "form-error" : "form-success"}>
+            <div
+              className={props.submitState.tone === "error" ? "form-error" : "form-success"}
+              style={{ marginBottom: 14 }}
+            >
               {props.submitState.message}
             </div>
           ) : null}
-          {!isLocked && <button type="submit" className="btn-primary" disabled={props.submitting || props.capturedBlobs.length === 0}>Submit Evidence</button>}
+          {!isLocked && (
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={props.submitting || props.capturedBlobs.length === 0}
+            >
+              Submit evidence
+            </button>
+          )}
         </form>
       </section>
     </>
@@ -1261,9 +1796,22 @@ function NgoCaptureView(props: any) {
 }
 
 function CameraCard(props: any) {
+  const todayLabel = getLocalDateStringClient();
+  const coords = props.evidenceCoords;
   return (
     <section className="card-section">
-      <span className="section-title">Evidence Capture</span>
+      <span className="section-title">Capture</span>
+      {props.evidenceLocating || props.cameraLoading ? (
+        <div className="skeleton-inline-row" aria-busy="true" style={{ marginBottom: 8 }}>
+          <Skeleton className="skeleton-line-sm" />
+          <span className="sr-only">{props.evidenceLocating ? "Acquiring GPS" : "Opening camera"}</span>
+        </div>
+      ) : null}
+      {coords ? (
+        <p className="attendance-capture-gps" style={{ marginBottom: 8 }}>
+          GPS · {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} · {todayLabel}
+        </p>
+      ) : null}
 
       <div className="viewfinder">
           <video ref={props.videoRef} autoPlay playsInline muted />
@@ -1286,10 +1834,19 @@ function CameraCard(props: any) {
 
       {props.cameraError ? <div className="form-error" style={{ marginBottom: '12px' }}>{props.cameraError}</div> : null}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-         <button className="btn-outline" onClick={props.cameraReady ? props.stopCamera : props.startCamera} style={{ flex: 1 }}>{props.cameraReady ? "Stop Feed" : "Open Camera"}</button>
-         <button className="btn-shutter" onClick={() => props.capturePhoto(props.contextLabel)} disabled={!props.cameraReady || props.capturedBlobs.length >= 5}><div className="btn-shutter-inner" /></button>
-         <div style={{ flex: 1, textAlign: 'right', fontWeight: 800, fontSize: '1.5rem' }}>{props.capturedBlobs.length}<span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>/5</span></div>
+      <div className="capture-shutter-row">
+         <button
+           type="button"
+           className="btn-shutter"
+           aria-label="Capture photo"
+           onClick={() => props.capturePhoto(props.contextLabel)}
+           disabled={props.disabled || !props.cameraReady || !coords || props.capturedBlobs.length >= 5}
+         >
+           <div className="btn-shutter-inner" />
+         </button>
+         <div className="capture-count" aria-live="polite">
+           {props.capturedBlobs.length}<span>/5</span>
+         </div>
       </div>
       <div className="chips-row" style={{ marginTop: '20px' }}>
         {props.capturedBlobs.map((item: any, idx: number) => (

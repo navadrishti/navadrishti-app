@@ -167,8 +167,19 @@ export function apiUrl(path: string): string {
 
 /** fetch wrapper — always sends cookies for session auth across PWA / platform gateway. */
 export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers || {});
+  if (typeof window !== "undefined" && !headers.has("x-device-id")) {
+    try {
+      const existing = window.localStorage.getItem("navadrishti.device-id");
+      if (existing) headers.set("x-device-id", existing);
+    } catch {
+      /* ignore */
+    }
+  }
+
   return fetch(apiUrl(path), {
     ...init,
+    headers,
     credentials: "include",
   });
 }

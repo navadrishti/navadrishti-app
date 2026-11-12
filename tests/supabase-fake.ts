@@ -16,7 +16,7 @@ export function createSupabaseFake() {
         return Promise.resolve({ data: next.data ?? null, error: next.error ?? null });
       };
       const builder: Record<string, unknown> = {};
-      for (const method of ["select", "eq", "neq", "not", "in", "ilike", "order", "limit", "or"]) {
+      for (const method of ["select", "eq", "neq", "not", "in", "ilike", "order", "limit", "or", "is", "range"]) {
         builder[method] = (...args: unknown[]) => {
           if (method !== "select") query.filters.push([method, ...args]);
           return builder;

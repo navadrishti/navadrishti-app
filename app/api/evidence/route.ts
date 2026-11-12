@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "node:crypto";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/session";
 import { getServerSupabaseClient } from "@/lib/supabase-server";
 import { hasCloudinaryEnv, sanitizeCloudinarySegment, uploadBufferToCloudinary } from "@/lib/cloudinary";
@@ -9,19 +8,23 @@ import {
   evidenceMediaType,
   isLockedMilestoneStatus,
   LOCKED_MILESTONE_STATUSES,
+  priorMilestonesArePaidComplete,
   validateEvidenceFiles,
 } from "@/lib/evidence-rules";
+import {
+  assertClientMediaProofs,
+  assertExpectedPrevHash,
+  calculateEvidenceChainHash,
+  hashMediaBytes,
+} from "@/lib/evidence-integrity";
+import {
+  fieldOfficerHasPermission,
+  type FieldOfficerIdentityRow,
+} from "@/lib/field-officer-auth";
+import { assertFieldOfficerAssignedToProject } from "@/lib/field-officer-projects";
 import { IngestionPayload, SyncApiResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
-
-function calculateServerHash(payload: any, prevHash: string | null): string {
-  const dataToHash = JSON.stringify({
-    prev_hash: prevHash,
-    data: payload
-  });
-  return crypto.createHash("sha256").update(dataToHash).digest("hex");
-}
 
 function fail(error: string, status: number) {
   return NextResponse.json<SyncApiResponse>({ ok: false, error }, { status });
@@ -38,6 +41,24 @@ function validTimestamp(value: unknown): string {
   return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
 }
 
+type EvidenceActor =
+  | {
+      role: "ngo";
+      ngoUserId: number;
+      uploadedBy: number;
+      deviceIdFallback: string;
+      source: "field_pwa";
+      identity: null;
+    }
+  | {
+      role: "field_officer";
+      ngoUserId: number;
+      uploadedBy: number;
+      deviceIdFallback: string;
+      source: "field_officer_pwa";
+      identity: FieldOfficerIdentityRow;
+    };
+
 export async function POST(request: NextRequest) {
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const session = verifySessionToken(token);
@@ -46,8 +67,8 @@ export async function POST(request: NextRequest) {
     return fail("Authentication required.", 401);
   }
 
-  if (session.role !== "ngo") {
-    return fail("Evidence capture is available for NGO accounts.", 403);
+  if (session.role !== "ngo" && session.role !== "field_officer") {
+    return fail("Evidence capture is available for NGO and Field Officer accounts.", 403);
   }
 
   if (!hasCloudinaryEnv()) {
@@ -55,11 +76,12 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const ngoId = Number(session.ngoId);
-    const blockReason = await findAccountBlockReason(ngoId);
-    if (blockReason) return fail(blockReason, 403);
-
-    const formData = await request.formData();
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch {
+      return fail("Payload missing.", 400);
+    }
     const payloadStr = formData.get("payload");
     if (typeof payloadStr !== "string" || !payloadStr) {
       return fail("Payload missing.", 400);
@@ -78,7 +100,26 @@ export async function POST(request: NextRequest) {
       return fail("event_id is required.", 400);
     }
 
+    // Never trust client-supplied ownership / officer identity fields.
     const supabase = getServerSupabaseClient();
+    const clientDeviceId =
+      request.headers.get("x-device-id") || String(data.deviceId || "").trim() || null;
+
+    let actor: EvidenceActor | null = null;
+
+    if (session.role === "ngo") {
+      const ngoId = Number(session.ngoId);
+      const blockReason = await findAccountBlockReason(ngoId);
+      if (blockReason) return fail(blockReason, 403);
+      actor = {
+        role: "ngo",
+        ngoUserId: ngoId,
+        uploadedBy: ngoId,
+        deviceIdFallback: String(data.deviceId || "unknown"),
+        source: "field_pwa",
+        identity: null,
+      };
+    }
 
     const { data: existingEvent, error: existingError } = await supabase
       .from("field_events")
@@ -87,8 +128,8 @@ export async function POST(request: NextRequest) {
       .maybeSingle();
     if (existingError) throw existingError;
 
-    if (existingEvent) {
-      if (Number(existingEvent.ngo_id) !== ngoId) {
+    if (existingEvent && actor) {
+      if (Number(existingEvent.ngo_id) !== actor.ngoUserId) {
         return fail("Evidence event already exists.", 409);
       }
       const requestedEntityId = String(data.milestoneId || data.projectId || "").trim();
@@ -130,25 +171,99 @@ export async function POST(request: NextRequest) {
       .eq("id", projectId)
       .maybeSingle();
     if (projectError) throw projectError;
-    if (!project || Number(project.ngo_user_id) !== ngoId) {
+    if (!project) {
       return fail(milestone ? "Milestone not found." : "Project not found.", 404);
+    }
+
+    if (session.role === "field_officer") {
+      const access = await assertFieldOfficerAssignedToProject(session, projectId, {
+        allowPasswordChangePending: false,
+        clientDeviceId,
+      });
+      if (!access.ok) {
+        return fail(access.error, access.status === 404 ? 404 : access.status);
+      }
+      if (!fieldOfficerHasPermission(access.identity.permissions, "can_submit_field_evidence")) {
+        return fail("You do not have permission to submit field evidence.", 403);
+      }
+      if (Number(project.ngo_user_id) !== access.identity.ngo_user_id) {
+        return fail("This project is not assigned to your account.", 403);
+      }
+
+      actor = {
+        role: "field_officer",
+        ngoUserId: access.identity.ngo_user_id,
+        uploadedBy: access.identity.user_id,
+        deviceIdFallback: access.deviceId || clientDeviceId || "unknown",
+        source: "field_officer_pwa",
+        identity: access.identity,
+      };
+
+      if (existingEvent) {
+        if (Number(existingEvent.ngo_id) !== actor.ngoUserId) {
+          return fail("Evidence event already exists.", 409);
+        }
+        const requestedEntityId = String(data.milestoneId || data.projectId || "").trim();
+        if (requestedEntityId && String(existingEvent.entity_id) !== requestedEntityId) {
+          return fail("Evidence event conflicts with an existing submission.", 409);
+        }
+        return NextResponse.json<SyncApiResponse>({
+          ok: true,
+          eventId: existingEvent.id,
+          payloadHash: existingEvent.payload_hash,
+        });
+      }
+    } else if (actor) {
+      if (Number(project.ngo_user_id) !== actor.ngoUserId) {
+        return fail(milestone ? "Milestone not found." : "Project not found.", 404);
+      }
+    }
+
+    if (!actor) {
+      return fail("Evidence capture is available for NGO and Field Officer accounts.", 403);
     }
 
     if (milestone && isLockedMilestoneStatus(milestone.status)) {
       return fail("This milestone is already approved, so new evidence can't be added.", 422);
     }
 
+    if (milestone) {
+      const { data: siblings, error: siblingsError } = await supabase
+        .from("csr_project_milestones")
+        .select("id, status, milestone_order")
+        .eq("project_id", projectId);
+      if (siblingsError) throw siblingsError;
+      if (!priorMilestonesArePaidComplete(siblings || [], milestone.id)) {
+        return fail(
+          "Previous milestone payment must be confirmed before evidence can be submitted for this milestone.",
+          422
+        );
+      }
+    }
+
     const files = formData.getAll("files").filter((entry): entry is File => entry instanceof File);
     const fileError = validateEvidenceFiles(files);
     if (fileError) return fail(fileError, 413);
 
-    const folderPath = `navadrishti/ngo-${ngoId}/${milestone ? `milestone-${sanitizeCloudinarySegment(milestone.id)}` : `project-${sanitizeCloudinarySegment(String(project.id))}`}`;
-    const cloudinaryAssets = [];
+    const fileBuffers: Buffer[] = [];
+    const mediaContentHashes: string[] = [];
     for (const file of files) {
       const buffer = Buffer.from(await file.arrayBuffer());
+      fileBuffers.push(buffer);
+      mediaContentHashes.push(hashMediaBytes(buffer));
+    }
+
+    const proofError = assertClientMediaProofs(data.mediaProofHashes ?? body.media_proof_hashes, mediaContentHashes);
+    if (proofError) return fail(proofError, 400);
+
+    const folderPath = `navadrishti/ngo-${actor.ngoUserId}/${milestone ? `milestone-${sanitizeCloudinarySegment(milestone.id)}` : `project-${sanitizeCloudinarySegment(String(project.id))}`}`;
+    const cloudinaryAssets = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const buffer = fileBuffers[i];
       const upload = await uploadBufferToCloudinary(buffer, {
         folder: folderPath,
-        resource_type: "auto"
+        resource_type: "auto",
       });
 
       cloudinaryAssets.push({
@@ -158,28 +273,73 @@ export async function POST(request: NextRequest) {
         bytes: upload.bytes,
         mime_type: file.type,
         file_name: file.name || null,
+        content_sha256: mediaContentHashes[i],
       });
     }
 
     const capturedAt = validTimestamp(body.timestamp);
+    const {
+      uploaded_by: _ignoreUploadedBy,
+      ngo_user_id: _ignoreNgoUserId,
+      field_officer_identity_id: _ignoreFoIdentity,
+      ...safeClientData
+    } = data as Record<string, unknown>;
+
     const finalData = {
-      ...data,
+      ...safeClientData,
       media: cloudinaryAssets,
-      capturedAtServer: new Date().toISOString()
+      media_content_hashes: mediaContentHashes,
+      capturedAtServer: new Date().toISOString(),
+      actor_role: actor.role,
+      resolved_ngo_user_id: actor.ngoUserId,
+      resolved_uploaded_by: actor.uploadedBy,
+      field_officer_identity_id: actor.identity?.id ?? null,
     };
 
     const chainEntityId = milestone?.id || String(project.id);
     const { data: lastEvent, error: lastEventError } = await supabase
       .from("field_events")
-      .select("payload_hash")
+      .select("id, payload_hash, timestamp")
       .eq("entity_id", chainEntityId)
       .order("timestamp", { ascending: false })
+      .order("id", { ascending: false })
       .limit(1)
       .maybeSingle();
     if (lastEventError) throw lastEventError;
 
     const prevHash = lastEvent?.payload_hash ?? null;
-    const authoritativeHash = calculateServerHash(finalData, prevHash);
+
+    const claimedPrev =
+      (data as { expectedPrevHash?: unknown }).expectedPrevHash ??
+      body.expected_prev_hash ??
+      body.prev_hash;
+    const prevMismatch = assertExpectedPrevHash(claimedPrev, prevHash);
+    if (prevMismatch) return fail(prevMismatch, 409);
+
+    const tipOccupancyBase = supabase
+      .from("field_events")
+      .select("id")
+      .eq("entity_id", chainEntityId)
+      .limit(1);
+    const tipOccupancy =
+      prevHash === null
+        ? tipOccupancyBase.is("prev_hash", null)
+        : tipOccupancyBase.eq("prev_hash", prevHash);
+    const { data: occupyingChild, error: occupyError } = await tipOccupancy.maybeSingle();
+    if (occupyError) throw occupyError;
+    if (occupyingChild) {
+      return fail("Evidence chain tip changed. Retry sync to append to the latest tip.", 409);
+    }
+
+    const authoritativeHash = calculateEvidenceChainHash({
+      prevHash,
+      sealedData: finalData,
+      mediaContentHashes,
+    });
+
+    const resolvedDeviceId = String(
+      actor.role === "field_officer" ? actor.deviceIdFallback : data.deviceId || actor.deviceIdFallback
+    );
 
     if (milestone) {
       const immutableHash = evidenceImmutableHash(event_id);
@@ -196,21 +356,24 @@ export async function POST(request: NextRequest) {
           .insert({
             milestone_id: milestone.id,
             project_id: project.id,
-            uploaded_by: ngoId,
-            ngo_user_id: ngoId,
-            device_id: String(data.deviceId || "unknown"),
+            uploaded_by: actor.uploadedBy,
+            ngo_user_id: actor.ngoUserId,
+            device_id: resolvedDeviceId || "unknown",
             description: typeof data.notes === "string" && data.notes.trim() ? data.notes.trim() : null,
             gps_lat: finiteOrNull(data.gpsLat),
             gps_long: finiteOrNull(data.gpsLng),
             gps_accuracy_meters: finiteOrNull(data.gpsAccuracy),
             captured_at: capturedAt,
             evidence_summary: {
-              source: "field_pwa",
+              source: actor.source,
               field_event_id: event_id,
               payload_hash: authoritativeHash,
+              media_content_hashes: mediaContentHashes,
               beneficiary_name: data.beneficiaryName || null,
               interaction_type: data.interactionType || null,
               reference_point_id: data.referencePointId || null,
+              field_officer_identity_id: actor.identity?.id ?? null,
+              field_officer_user_id: actor.role === "field_officer" ? actor.uploadedBy : null,
             },
             submission_status: "submitted",
             immutable_hash: immutableHash,
@@ -238,8 +401,15 @@ export async function POST(request: NextRequest) {
           entity_id: evidence.id,
           event_type: "milestone_evidence_submitted",
           event_hash: `evidence_submitted:${evidence.id}:${Date.now()}`,
-          event_payload: { milestone_id: milestone.id, project_id: project.id, uploaded_by: ngoId, source: "field_pwa" },
-          created_by: ngoId,
+          event_payload: {
+            milestone_id: milestone.id,
+            project_id: project.id,
+            uploaded_by: actor.uploadedBy,
+            ngo_user_id: actor.ngoUserId,
+            source: actor.source,
+            field_officer_identity_id: actor.identity?.id ?? null,
+          },
+          created_by: actor.uploadedBy,
         });
         if (auditError) console.error("[api/evidence] audit log insert failed:", auditError);
       }
@@ -262,16 +432,29 @@ export async function POST(request: NextRequest) {
         payload_hash: authoritativeHash,
         prev_hash: prevHash,
         user_id: session.email,
-        ngo_id: ngoId,
-        device_id: String(data.deviceId || "unknown"),
-        timestamp: new Date().toISOString()
+        ngo_id: actor.ngoUserId,
+        device_id: resolvedDeviceId || "unknown",
+        timestamp: new Date().toISOString(),
       })
       .select("id")
       .single();
 
     if (insertError) {
       if ((insertError as { code?: string }).code === "23505") {
-        return NextResponse.json<SyncApiResponse>({ ok: true, payloadHash: authoritativeHash });
+        const { data: raced, error: racedError } = await supabase
+          .from("field_events")
+          .select("id, payload_hash, ngo_id")
+          .eq("event_id", event_id)
+          .maybeSingle();
+        if (racedError) throw racedError;
+        if (raced && Number(raced.ngo_id) === actor.ngoUserId) {
+          return NextResponse.json<SyncApiResponse>({
+            ok: true,
+            eventId: raced.id,
+            payloadHash: raced.payload_hash,
+          });
+        }
+        return fail("Evidence chain tip changed. Retry sync to append to the latest tip.", 409);
       }
       throw insertError;
     }
@@ -280,7 +463,7 @@ export async function POST(request: NextRequest) {
       ok: true,
       eventId: inserted.id,
       payloadHash: authoritativeHash,
-      media: cloudinaryAssets
+      media: cloudinaryAssets,
     });
   } catch (err) {
     console.error("[Sync API] Error:", err);

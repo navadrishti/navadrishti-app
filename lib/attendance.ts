@@ -5,7 +5,7 @@ import { findAccountBlockReason } from "@/lib/account-access";
 
 export const CAMPAIGN_VOLUNTEER_ENGAGEMENT_KIND = "campaign_volunteer";
 
-export type AttendanceKind = "campaign_volunteer" | "skill_service" | "service_offer";
+export type AttendanceKind = "campaign_volunteer" | "skill_service" | "service_offer" | "csr_capability";
 export type AttendanceBucket = "active" | "history";
 
 export class AttendanceError extends Error {
@@ -36,9 +36,29 @@ function isUniqueViolation(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && (error as { code?: string }).code === "23505");
 }
 
-/** Schema CHECK: active | in_progress | completed | cancelled (+ legacy values when reading). */
+/**
+ * Schema CHECK on service_engagement_assignments.status:
+ * active | in_progress | completed | cancelled.
+ * Only active/in_progress may be marked. Legacy history tokens are treated as history when reading.
+ */
 const ACTIVE_ASSIGNMENT_STATUSES = new Set(["active", "in_progress"]);
-const HISTORY_ASSIGNMENT_STATUSES = new Set(["completed", "cancelled"]);
+const HISTORY_ASSIGNMENT_STATUSES = new Set([
+  "completed",
+  "cancelled",
+  "canceled",
+  "finished",
+  "closed",
+  "done",
+  "expired",
+]);
+
+export function isActiveAssignmentStatus(status: unknown): boolean {
+  return ACTIVE_ASSIGNMENT_STATUSES.has(String(status || "").toLowerCase());
+}
+
+export function isHistoryAssignmentStatus(status: unknown): boolean {
+  return HISTORY_ASSIGNMENT_STATUSES.has(String(status || "").toLowerCase());
+}
 
 export function getSessionFromRequest(request: NextRequest): AppSession | null {
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
@@ -90,8 +110,35 @@ export function isCampaignVolunteerAssignment(assignment: {
 }
 
 /**
- * Daily-billed service offer rentals: the client (assignee) confirms the provider showed up and pays per day.
- * CSR capability rentals are paid upfront and are not billed through attendance.
+ * Field-worker / assignee path: an active campaign volunteer assignment grants
+ * PWA campaign visibility without requiring impact_metrics.volunteer_applications.
+ * Volunteer-apply flow remains separate (isCampaignVolunteerApplicant).
+ */
+export function isEligibleAssignedCampaignVolunteer(
+  assignment: {
+    assignee_user_id?: unknown;
+    status?: unknown;
+    target_type?: string;
+    meta?: unknown;
+  } | null | undefined,
+  userId: number
+): boolean {
+  if (!assignment) return false;
+  if (Number(assignment.assignee_user_id) !== Number(userId)) return false;
+  if (!isActiveAssignmentStatus(assignment.status)) return false;
+  if (!isCampaignVolunteerAssignment(assignment)) return false;
+
+  const kind = String(safeJson(assignment.meta).engagement_kind || "").trim();
+  if (kind && kind !== CAMPAIGN_VOLUNTEER_ENGAGEMENT_KIND) return false;
+  if (assignment.target_type === "csr_project" && kind !== CAMPAIGN_VOLUNTEER_ENGAGEMENT_KIND) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Daily-billed hired service offers. Completion stays on the Main delivery/payment workflow —
+ * they are not listed or markable in GRAM PWA attendance.
  */
 export function isDailyServiceOfferAssignment(assignment: {
   target_type?: string;
@@ -105,6 +152,14 @@ export function isDailyServiceOfferAssignment(assignment: {
   const paymentMode = String(assignment.payment_mode || meta.payment_mode || "").toLowerCase();
   const billingCycle = String(assignment.billing_cycle || meta.billing_cycle || "").toLowerCase();
   return paymentMode === "daily_due" || billingCycle === "daily";
+}
+
+/** Paid-upfront campaign capabilities — completed via platform rental/delivery, not PWA attendance. */
+export function isCsrCapabilityRentalAssignment(
+  assignment: { meta?: unknown } | null | undefined
+): boolean {
+  if (!assignment) return false;
+  return safeJson(assignment.meta).flow === "csr_capability_rental";
 }
 
 export function resolveCampaignIdFromAssignment(assignment: {
@@ -146,8 +201,8 @@ function getCampaignLifecycle(input: {
   onDate?: string;
 }): "yet_to_start" | "started" | "finished" | "cancelled" {
   const status = String(input.campaignStatus || "").toLowerCase();
-  if (status === "cancelled" || status === "rejected") return "cancelled";
-  if (status === "completed" || status === "finished" || status === "closed") return "finished";
+  if (status === "cancelled" || status === "canceled" || status === "rejected") return "cancelled";
+  if (status === "completed" || status === "finished" || status === "closed" || status === "done" || status === "ended") return "finished";
   if (status === "draft") return "yet_to_start";
 
   const today = input.onDate || getLocalDateString();
@@ -199,13 +254,28 @@ function isCampaignVolunteerApplicant(campaign: CampaignLeadRef, userId: number)
   return Boolean(getVolunteerApplicationForUser(campaign.impact_metrics, userId));
 }
 
-function getNgoNeedFulfillmentMode(request: Record<string, any> | null | undefined): string {
+/** Aligns with Main `lib/service-request-allocation/fulfillment-mode.ts`. */
+export function getNgoNeedFulfillmentMode(request: Record<string, any> | null | undefined): string {
   const type = String(request?.request_type || request?.category || "").toLowerCase();
-  if (type.includes("material") || type.includes("deliver")) return "material";
   if (type.includes("financial") || type.includes("fund") || type.includes("money")) return "financial";
+  if (type.includes("material") || type.includes("deliver")) return "material";
   if (type.includes("infrastructure") || type.includes("infra")) return "infrastructure";
   if (type.includes("skill") || type.includes("service")) return "skill_service";
   return "skill_service";
+}
+
+function attendanceBlockedForFulfillmentMode(mode: string): string | null {
+  if (mode === "skill_service") return null;
+  if (mode === "material") {
+    return "Material supply is completed through delivery confirmation, not attendance";
+  }
+  if (mode === "infrastructure") {
+    return "Infrastructure work is completed through the fulfilment lifecycle, not attendance";
+  }
+  if (mode === "financial") {
+    return "Financial needs are completed through payment fulfilment, not attendance";
+  }
+  return "This service type does not use field attendance";
 }
 
 function emptyBucket() {
@@ -219,12 +289,7 @@ export async function listAttendanceAssignments(userId: number) {
     .from("service_engagement_assignments")
     .select("*")
     .or(`assignee_user_id.eq.${userId},owner_user_id.eq.${userId}`)
-    .in("status", [
-      "active",
-      "in_progress",
-      "completed",
-      "cancelled",
-    ]);
+    .in("status", ["active", "in_progress", "completed", "cancelled"]);
 
   if (assignmentError) throw assignmentError;
 
@@ -242,9 +307,25 @@ export async function listAttendanceAssignments(userId: number) {
   const volunteered = (campaigns || []).filter((campaign) =>
     isCampaignVolunteerApplicant(campaign, userId)
   );
+  const campaignsById = new Map((campaigns || []).map((row) => [String(row.id), row]));
+
+  const campaignAssignments = rows.filter((row) => isCampaignVolunteerAssignment(row));
+  const assignmentsByCampaignId = new Map(
+    campaignAssignments.map((row) => [resolveCampaignIdFromAssignment(row) || String(row.target_id), row])
+  );
+
+  const assignedCampaignRows = rows.filter((row) => isEligibleAssignedCampaignVolunteer(row, userId));
+  const assignedCampaignIds = assignedCampaignRows
+    .map((row) => resolveCampaignIdFromAssignment(row) || String(row.target_id || ""))
+    .filter(Boolean);
 
   const companyIds = [
-    ...new Set(volunteered.map((row) => Number(row.company_id || 0)).filter((id) => id > 0)),
+    ...new Set(
+      [
+        ...volunteered.map((row) => Number(row.company_id || 0)),
+        ...assignedCampaignIds.map((id) => Number(campaignsById.get(String(id))?.company_id || 0)),
+      ].filter((id) => id > 0)
+    ),
   ];
   const { data: companies } =
     companyIds.length > 0
@@ -252,27 +333,71 @@ export async function listAttendanceAssignments(userId: number) {
       : { data: [] as any[] };
   const companiesById = new Map((companies || []).map((row) => [Number(row.id), row]));
 
-  const campaignAssignments = rows.filter((row) => isCampaignVolunteerAssignment(row));
-  const assignmentsByCampaignId = new Map(
-    campaignAssignments.map((row) => [resolveCampaignIdFromAssignment(row) || String(row.target_id), row])
-  );
+  const seenCampaignIds = new Set<string>();
+
+  const pushCampaignAttendanceItem = (input: {
+    campaign: (typeof volunteered)[number];
+    assignment: (typeof rows)[number] | null | undefined;
+    capacity: number;
+  }) => {
+    const campaignId = String(input.campaign.id);
+    if (seenCampaignIds.has(campaignId)) return;
+    if (isCampaignLeadNgo(input.campaign, userId)) return;
+
+    const lifecycle = getCampaignLifecycle({
+      startDate: input.campaign.start_date,
+      endDate: input.campaign.end_date,
+      campaignStatus: input.campaign.status,
+    });
+    const bucket = isHistoryLifecycle(lifecycle) ? history : active;
+    const meta = safeJson(input.assignment?.meta);
+    const company = companiesById.get(Number(input.campaign.company_id || 0));
+    const assignmentActive = isActiveAssignmentStatus(input.assignment?.status);
+    const markBlockedReason =
+      lifecycle === "yet_to_start"
+        ? "Opens when the campaign starts"
+        : lifecycle !== "started"
+          ? "Campaign has ended"
+          : !input.assignment?.id
+            ? "Attendance is not set up yet. Refresh in a moment."
+            : !assignmentActive
+              ? "Your volunteer assignment is no longer active"
+              : null;
+
+    seenCampaignIds.add(campaignId);
+    bucket.campaignItems.push({
+      kind: "campaign_volunteer" as const,
+      assignment_id: input.assignment?.id || null,
+      title: input.campaign.title || "CSR Campaign",
+      subtitle: company?.name || "Company",
+      location: input.campaign.location || null,
+      lifecycle,
+      campaign_status: input.campaign.status || "draft",
+      start_date: input.campaign.start_date || null,
+      end_date: input.campaign.end_date || null,
+      volunteer_capacity: toNumber(input.capacity || meta.volunteer_capacity, 1) || 1,
+      attendance_summary: meta.attendance_summary || {},
+      can_mark: markBlockedReason === null,
+      mark_blocked_reason: markBlockedReason,
+      mark_mode: "self_location" as const,
+      bucket: isHistoryLifecycle(lifecycle) ? ("history" as const) : ("active" as const),
+    });
+  };
 
   for (const campaign of volunteered) {
     const application = getVolunteerApplicationForUser(campaign.impact_metrics, userId);
     if (!application) continue;
-    if (isCampaignLeadNgo(campaign, userId)) continue;
-
-    const lifecycle = getCampaignLifecycle({
-      startDate: campaign.start_date,
-      endDate: campaign.end_date,
-      campaignStatus: campaign.status,
-    });
-    const bucket = isHistoryLifecycle(lifecycle) ? history : active;
 
     let assignment = assignmentsByCampaignId.get(String(campaign.id));
 
-    // Only auto-create assignment rows for active/upcoming campaigns
-    if (!assignment && !isHistoryLifecycle(lifecycle)) {
+    // Only auto-create assignment rows for active/upcoming campaigns (volunteer-apply path).
+    if (!assignment && !isHistoryLifecycle(
+      getCampaignLifecycle({
+        startDate: campaign.start_date,
+        endDate: campaign.end_date,
+        campaignStatus: campaign.status,
+      })
+    )) {
       const ownerUserId = Number(campaign.company_id || 0) || userId;
       const capacity = toNumber(application.capacity, 1) || 1;
       const { data: created, error: createError } = await supabase
@@ -313,48 +438,36 @@ export async function listAttendanceAssignments(userId: number) {
       }
     }
 
-    const meta = safeJson(assignment?.meta);
-    const company = companiesById.get(Number(campaign.company_id || 0));
-    const assignmentActive = ACTIVE_ASSIGNMENT_STATUSES.has(String(assignment?.status || "").toLowerCase());
-    const markBlockedReason =
-      lifecycle === "yet_to_start"
-        ? "Opens when the campaign starts"
-        : lifecycle !== "started"
-          ? "Campaign has ended"
-          : !assignment?.id
-            ? "Attendance is not set up yet. Refresh in a moment."
-            : !assignmentActive
-              ? "Your volunteer assignment is no longer active"
-              : null;
-
-    bucket.campaignItems.push({
-      kind: "campaign_volunteer" as const,
-      assignment_id: assignment?.id || null,
-      title: campaign.title || "CSR Campaign",
-      subtitle: company?.name || "Company",
-      location: campaign.location || null,
-      lifecycle,
-      campaign_status: campaign.status || "draft",
-      start_date: campaign.start_date || null,
-      end_date: campaign.end_date || null,
-      volunteer_capacity: toNumber(application.capacity || meta.volunteer_capacity, 1) || 1,
-      attendance_summary: meta.attendance_summary || {},
-      can_mark: markBlockedReason === null,
-      mark_blocked_reason: markBlockedReason,
-      mark_mode: "self_location" as const,
-      bucket: isHistoryLifecycle(lifecycle) ? ("history" as const) : ("active" as const),
+    pushCampaignAttendanceItem({
+      campaign,
+      assignment,
+      capacity: toNumber(application.capacity, 1) || 1,
     });
   }
 
-  const ownedSkill = rows.filter((row) => {
+  // Assignment path: active field-worker assignees see the campaign without a volunteer application.
+  for (const assignment of assignedCampaignRows) {
+    const campaignId = resolveCampaignIdFromAssignment(assignment) || String(assignment.target_id || "");
+    if (!campaignId || seenCampaignIds.has(campaignId)) continue;
+    const campaign = campaignsById.get(campaignId);
+    if (!campaign) continue;
+    const meta = safeJson(assignment.meta);
+    pushCampaignAttendanceItem({
+      campaign,
+      assignment,
+      capacity: toNumber(meta.volunteer_capacity, 1) || 1,
+    });
+  }
+
+  // Skill-based service: the provider (assignee) self-marks — NGO lead does not mark for them.
+  const providerSkill = rows.filter((row) => {
     const table = String(row.application_table || "");
-    // Canonical table after pass-2; accept legacy offline meta that still says service_volunteers.
     const isApplicationTable =
       table === "service_request_applications" ||
       table === "service_volunteers" ||
       !table;
     return (
-      Number(row.owner_user_id) === Number(userId) &&
+      Number(row.assignee_user_id) === Number(userId) &&
       row.target_type === "service_request" &&
       isApplicationTable &&
       !isCampaignVolunteerAssignment(row)
@@ -362,10 +475,10 @@ export async function listAttendanceAssignments(userId: number) {
   });
 
   const requestIds = [
-    ...new Set(ownedSkill.map((row) => Number(row.target_id || 0)).filter((id) => id > 0)),
+    ...new Set(providerSkill.map((row) => Number(row.target_id || 0)).filter((id) => id > 0)),
   ];
-  const assigneeIds = [
-    ...new Set(ownedSkill.map((row) => Number(row.assignee_user_id || 0)).filter((id) => id > 0)),
+  const ownerIds = [
+    ...new Set(providerSkill.map((row) => Number(row.owner_user_id || 0)).filter((id) => id > 0)),
   ];
 
   const { data: requests } =
@@ -376,96 +489,54 @@ export async function listAttendanceAssignments(userId: number) {
           .in("id", requestIds)
       : { data: [] as any[] };
 
-  const { data: assignees } =
-    assigneeIds.length > 0
-      ? await supabase.from("users").select("id, name, email").in("id", assigneeIds)
+  const { data: owners } =
+    ownerIds.length > 0
+      ? await supabase.from("users").select("id, name, email").in("id", ownerIds)
       : { data: [] as any[] };
 
   const requestsById = new Map((requests || []).map((row) => [Number(row.id), row]));
-  const assigneesById = new Map((assignees || []).map((row) => [Number(row.id), row]));
+  const ownersById = new Map((owners || []).map((row) => [Number(row.id), row]));
 
-  for (const assignment of ownedSkill) {
+  for (const assignment of providerSkill) {
     const request = requestsById.get(Number(assignment.target_id));
     if (!request) continue;
     if (getNgoNeedFulfillmentMode(request) !== "skill_service") continue;
 
     const status = String(assignment.status || "").toLowerCase();
     const isHistory =
-      HISTORY_ASSIGNMENT_STATUSES.has(status) ||
+      isHistoryAssignmentStatus(status) ||
       String(request.status || "").toLowerCase() === "fulfilled" ||
-      String(request.status || "").toLowerCase() === "completed" ||
-      String(request.status || "").toLowerCase() === "closed";
+      isHistoryAssignmentStatus(request.status);
     const bucket = isHistory ? history : active;
 
     const meta = safeJson(assignment.meta);
-    const assignee = assigneesById.get(Number(assignment.assignee_user_id));
+    const owner = ownersById.get(Number(assignment.owner_user_id));
     const dailyRate = toNumber(
       assignment.rate_per_unit ?? meta.rate_per_unit ?? meta.daily_rate,
       0
     );
-    const canMark = !isHistory && ACTIVE_ASSIGNMENT_STATUSES.has(status);
+    const canMark = !isHistory && isActiveAssignmentStatus(status);
 
     bucket.skillItems.push({
       kind: "skill_service" as const,
       assignment_id: assignment.id,
       title: request.title || "Skill / service need",
-      subtitle: assignee?.name || "Assignee",
-      assignee_email: assignee?.email || null,
+      subtitle: owner?.name || "Requesting organisation",
+      assignee_email: owner?.email || null,
       request_status: request.status || null,
       assignment_status: assignment.status || null,
       daily_rate: dailyRate,
       attendance_summary: meta.attendance_summary || {},
       can_mark: canMark,
       mark_blocked_reason: canMark ? null : "This assignment is no longer active",
-      mark_mode: "ngo_mark" as const,
+      mark_mode: "self_location" as const,
       assignee_user_id: Number(assignment.assignee_user_id || 0) || null,
       bucket: isHistory ? ("history" as const) : ("active" as const),
     });
   }
 
-  const hiredOffers = rows.filter(
-    (row) => Number(row.assignee_user_id) === Number(userId) && isDailyServiceOfferAssignment(row)
-  );
-  if (hiredOffers.length > 0) {
-    const offerIds = [...new Set(hiredOffers.map((row) => Number(row.target_id || 0)).filter((id) => id > 0))];
-    const providerIds = [...new Set(hiredOffers.map((row) => Number(row.owner_user_id || 0)).filter((id) => id > 0))];
-    const [{ data: offers }, { data: providers }] = await Promise.all([
-      offerIds.length > 0
-        ? supabase.from("service_offers").select("id, title").in("id", offerIds)
-        : Promise.resolve({ data: [] as any[] }),
-      providerIds.length > 0
-        ? supabase.from("users").select("id, name, email").in("id", providerIds)
-        : Promise.resolve({ data: [] as any[] }),
-    ]);
-    const offersById = new Map((offers || []).map((row) => [Number(row.id), row]));
-    const providersById = new Map((providers || []).map((row) => [Number(row.id), row]));
-
-    for (const assignment of hiredOffers) {
-      const status = String(assignment.status || "").toLowerCase();
-      const isHistory = HISTORY_ASSIGNMENT_STATUSES.has(status);
-      const canMark = !isHistory && ACTIVE_ASSIGNMENT_STATUSES.has(status);
-      const meta = safeJson(assignment.meta);
-      const provider = providersById.get(Number(assignment.owner_user_id));
-      const bucket = isHistory ? history : active;
-
-      bucket.skillItems.push({
-        kind: "service_offer" as const,
-        assignment_id: assignment.id,
-        title: offersById.get(Number(assignment.target_id))?.title || "Hired service",
-        subtitle: provider?.name || "Service provider",
-        assignee_email: provider?.email || null,
-        request_status: null,
-        assignment_status: assignment.status || null,
-        daily_rate: toNumber(assignment.rate_per_unit ?? meta.rate_per_unit, 0),
-        attendance_summary: meta.attendance_summary || {},
-        can_mark: canMark,
-        mark_blocked_reason: canMark ? null : "This engagement is no longer active",
-        mark_mode: "client_mark" as const,
-        assignee_user_id: Number(assignment.owner_user_id || 0) || null,
-        bucket: isHistory ? ("history" as const) : ("active" as const),
-      });
-    }
-  }
+  // Material, infrastructure, financial needs, hired service offers, and CSR capability
+  // rentals do not appear here — completion follows their delivery/fulfilment workflows.
 
   return {
     active,
@@ -519,7 +590,6 @@ export async function markAttendance(input: {
   }
 
   const isCampaign = isCampaignVolunteerAssignment(assignment);
-  const isOwner = Number(assignment.owner_user_id) === userId;
   const isAssignee = Number(assignment.assignee_user_id) === userId;
   let campaignApplication: Record<string, any> | null = null;
 
@@ -537,7 +607,7 @@ export async function markAttendance(input: {
       throw new AttendanceError("Lead NGOs do not mark volunteer attendance for themselves", 403);
     }
 
-    if (!ACTIVE_ASSIGNMENT_STATUSES.has(String(assignment.status || "").toLowerCase())) {
+    if (!isActiveAssignmentStatus(assignment.status)) {
       throw new AttendanceError("This campaign assignment is closed", 422);
     }
 
@@ -555,22 +625,35 @@ export async function markAttendance(input: {
     }
     campaignApplication = getVolunteerApplicationForUser(campaign?.impact_metrics, userId);
   } else if (assignment.target_type === "service_request") {
-    if (!isOwner) throw new AttendanceError("Only the assignment owner can mark daily attendance", 403);
+    // Skill providers self-mark; requesting NGO (owner) cannot mark on their behalf.
+    // Material / infrastructure / financial use delivery fulfilment — not attendance.
+    if (!isAssignee) {
+      throw new AttendanceError("Only the assigned skill provider can mark attendance", 403);
+    }
+    const { data: request } = await supabase
+      .from("service_requests")
+      .select("id, request_type, category, status")
+      .eq("id", assignment.target_id)
+      .maybeSingle();
+    const mode = getNgoNeedFulfillmentMode(request);
+    const blocked = attendanceBlockedForFulfillmentMode(mode);
+    if (blocked) throw new AttendanceError(blocked, 422);
     const status = String(assignment.status || "").toLowerCase();
-    if (!ACTIVE_ASSIGNMENT_STATUSES.has(status)) {
+    if (!isActiveAssignmentStatus(status)) {
       throw new AttendanceError("This assignment is closed", 422);
     }
-  } else if (isDailyServiceOfferAssignment(assignment)) {
-    if (!isAssignee) throw new AttendanceError("Only the client who hired this service can mark daily attendance", 403);
-    const status = String(assignment.status || "").toLowerCase();
-    if (!ACTIVE_ASSIGNMENT_STATUSES.has(status)) {
-      throw new AttendanceError("This engagement is closed", 422);
-    }
+  } else if (
+    isDailyServiceOfferAssignment(assignment) ||
+    isCsrCapabilityRentalAssignment(assignment) ||
+    assignment.target_type === "service_offer"
+  ) {
+    throw new AttendanceError(
+      "Service offers complete through the platform delivery workflow, not field attendance",
+      422
+    );
   } else {
     throw new AttendanceError("This assignment type cannot be marked from the field app", 422);
   }
-  const isServiceOffer = assignment.target_type === "service_offer";
-
   const { data: existing } = await supabase
     .from("service_attendance_entries")
     .select("id")
@@ -679,17 +762,13 @@ export async function markAttendance(input: {
       target_id: assignment.target_id,
       application_table:
         assignment.application_table ||
-        (assignment.target_type === "campaign"
-          ? "campaigns"
-          : isServiceOffer
-            ? "service_clients"
-            : "service_request_applications"),
+        (assignment.target_type === "campaign" ? "campaigns" : "service_request_applications"),
       application_id: assignment.application_id ?? null,
       attendance_date: today,
       attendance_status: status,
       attendance_source: attendanceSource,
       marked_by_user_id: userId,
-      marked_for_user_id: Number((isServiceOffer ? assignment.owner_user_id : assignment.assignee_user_id) || userId),
+      marked_for_user_id: Number(assignment.assignee_user_id || userId),
       units,
       multiplier: 1,
       rate_per_unit: ratePerUnit || null,

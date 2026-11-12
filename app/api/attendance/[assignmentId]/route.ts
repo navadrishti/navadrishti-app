@@ -18,6 +18,17 @@ export async function POST(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
+  if (session.role === "field_officer") {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          "Attendance is not part of the Field Officer role. Field Officers submit milestone evidence only.",
+      },
+      { status: 403 }
+    );
+  }
+
   if (!["ngo", "individual"].includes(session.role)) {
     return NextResponse.json(
       { ok: false, error: "Attendance is not available for this account." },

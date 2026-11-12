@@ -1,4 +1,8 @@
-export type SessionRole = "ngo" | "individual";
+export type SessionRole = "ngo" | "individual" | "field_officer";
+
+export type FieldOfficerSessionPermissions = {
+  can_submit_field_evidence: boolean;
+};
 
 export type AppSession = {
   id: string;
@@ -12,6 +16,10 @@ export type AppSession = {
   createdAt: string;
   deviceId?: string;
   avatarUrl?: string | null;
+  /** Present for Field Officer sessions — parent NGO comes from DB identity. */
+  identityId?: string;
+  mustChangePassword?: boolean;
+  permissions?: FieldOfficerSessionPermissions;
 };
 
 export type LocalRecordStatus = "pending" | "syncing" | "synced" | "failed";
@@ -163,6 +171,14 @@ export interface IngestionPayload {
   data: any;
   timestamp: string;
   proof_hash: string;
+  /** Optional per-file SHA-256 hex digests (same order as multipart files). */
+  media_proof_hashes?: string[];
+  /**
+   * Optional optimistic-concurrency tip the client built against.
+   * When set, the server rejects (409) if the authoritative tip differs.
+   */
+  expected_prev_hash?: string | null;
+  prev_hash?: string | null;
 }
 
 export interface SyncApiResponse {
