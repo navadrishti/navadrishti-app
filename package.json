@@ -15,7 +15,7 @@
     "cloudinary": "^2.9.0",
     "dexie": "^4.0.10",
     "dexie-react-hooks": "^1.1.7",
-    "next": "^16.3.6",
+    "next": "^16.4.1",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },
@@ -32,6 +32,7 @@
     "vitest": "^5.0.2"
   },
   "overrides": {
-    "serialize-javascript": "^7.1.2"
+    "serialize-javascript": "^7.1.2",
+    "source-map-js": "^1.2.2"
   }
 }
