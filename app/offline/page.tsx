@@ -9,12 +9,13 @@ export default function OfflinePage() {
       <section className="login-card">
         <div className="login-brand">
           <ProductBrand size="sm" nameClassName="brand-name-on-light" poweredClassName="brand-powered-on-light" />
-          <h1>You&apos;re Offline</h1>
+          <h1>You&apos;re offline</h1>
           <p className="login-status">
-            You can still capture evidence. It will sync when you&apos;re back online.
+            You can still mark attendance and capture evidence. Records stay on this device and upload
+            when the app is open and online again.
           </p>
           <button type="button" className="btn-primary" style={{ marginTop: 16 }} onClick={() => window.location.reload()}>
-            Try Again
+            Try again
           </button>
         </div>
       </section>

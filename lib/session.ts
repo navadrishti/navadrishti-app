@@ -15,6 +15,11 @@ export interface AppSession {
   deviceId: string;
   createdAt: string;
   avatarUrl?: string | null;
+  identityId?: string;
+  mustChangePassword?: boolean;
+  permissions?: {
+    can_submit_field_evidence: boolean;
+  };
 }
 
 export const SESSION_COOKIE_NAME = "navadrishti_session";

@@ -22,9 +22,11 @@
   "devDependencies": {
     "@ducanh2912/next-pwa": "^10.2.9",
     "@types/node": "^22.19.15",
+    "@types/pg": "^8.15.5",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "css-loader": "^7.1.4",
+    "pg": "^8.16.3",
     "style-loader": "^4.0.0",
     "typescript": "5.9.3",
     "vitest": "^5.0.2"

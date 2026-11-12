@@ -2,6 +2,13 @@ import bcrypt from "bcryptjs";
 import { resolveUserAvatarUrl } from "@/lib/utils";
 import { getServerSupabaseClient } from "@/lib/supabase-server";
 import { getAccountAccessBlockReason } from "@/lib/account-access";
+import {
+  findFieldOfficerIdentityByUserId,
+  normalizeFieldOfficerPermissions,
+  profileClaimsFieldOfficerRole,
+  touchFieldOfficerLastLogin,
+  type FieldOfficerPermissions,
+} from "@/lib/field-officer-auth";
 
 interface AuthDebugUser {
   id: number | null;
@@ -18,11 +25,18 @@ interface AuthDebugUser {
 export interface NgoAuthResult {
   allowed: boolean;
   reason: string;
+  /** Authenticated user id (officer id for Field Officers; NGO/individual id otherwise). */
+  userId?: number;
+  /** Display name for the authenticated user. */
+  name?: string;
   ngoId?: number;
   ngoName?: string;
   email?: string;
   role?: string;
   avatarUrl?: string | null;
+  identityId?: string;
+  mustChangePassword?: boolean;
+  permissions?: FieldOfficerPermissions;
   debug: {
     stage: string;
     authEmail: string;
@@ -189,6 +203,8 @@ export async function authenticateNgoWithPassword(
     return {
       allowed: true,
       reason: "OK",
+      userId: userRow.id as number,
+      name: displayName,
       ngoId: userRow.id as number,
       role: "ngo",
       ngoName:
@@ -199,7 +215,69 @@ export async function authenticateNgoWithPassword(
     };
   }
 
-  // individual
+  // individual — Field Officers are individual users with a linked identity.
+  debug.stage = "lookup-field-officer-identity";
+  let fieldOfficerIdentity: Awaited<ReturnType<typeof findFieldOfficerIdentityByUserId>> = null;
+  try {
+    fieldOfficerIdentity = await findFieldOfficerIdentityByUserId(userRow.id as number);
+  } catch (error) {
+    console.error("[ngo-auth] field officer identity lookup failed:", error);
+    return {
+      allowed: false,
+      reason: "Sign-in is temporarily unavailable. Try again shortly.",
+      debug: { ...debug, stage: "field-officer-lookup-error" },
+    };
+  }
+
+  const claimsFieldOfficer = profileClaimsFieldOfficerRole(userRow.profile_data);
+  if (fieldOfficerIdentity || claimsFieldOfficer) {
+    if (!fieldOfficerIdentity || fieldOfficerIdentity.status !== "active") {
+      return {
+        allowed: false,
+        // Same generic denial whether identity is missing or inactive — avoid enumeration.
+        reason: "This account cannot sign in.",
+        debug: { ...debug, stage: "field-officer-inactive" },
+      };
+    }
+
+    if (!Number.isFinite(fieldOfficerIdentity.ngo_user_id) || fieldOfficerIdentity.ngo_user_id <= 0) {
+      return {
+        allowed: false,
+        reason: "This account cannot sign in.",
+        debug: { ...debug, stage: "field-officer-malformed" },
+      };
+    }
+
+    await touchFieldOfficerLastLogin(fieldOfficerIdentity.id);
+
+    let ngoName = displayName;
+    const { data: parentNgo } = await supabase
+      .from("users")
+      .select("name")
+      .eq("id", fieldOfficerIdentity.ngo_user_id)
+      .maybeSingle();
+    if (typeof parentNgo?.name === "string" && parentNgo.name.trim()) {
+      ngoName = parentNgo.name.trim();
+    }
+
+    return {
+      allowed: true,
+      reason: "OK",
+      userId: userRow.id as number,
+      name: displayName,
+      // Parent NGO from DB identity only — never from client input.
+      ngoId: fieldOfficerIdentity.ngo_user_id,
+      ngoName,
+      email: typeof userRow.email === "string" ? userRow.email : normalizedEmail,
+      role: "field_officer",
+      avatarUrl,
+      identityId: fieldOfficerIdentity.id,
+      mustChangePassword: fieldOfficerIdentity.must_change_password,
+      permissions: normalizeFieldOfficerPermissions(fieldOfficerIdentity.permissions),
+      debug: { ...debug, stage: "authenticated-field-officer" },
+    };
+  }
+
   debug.stage = "lookup-individual";
   const { data: indVerif, error: indVerifError } = await supabase
     .from("individual_verifications")
@@ -230,6 +308,8 @@ export async function authenticateNgoWithPassword(
   return {
     allowed: true,
     reason: "OK",
+    userId: userRow.id as number,
+    name: displayName,
     ngoId: userRow.id as number,
     role: "individual",
     ngoName: displayName,

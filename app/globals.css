@@ -180,6 +180,7 @@ body {
 
 .dot-online { background: var(--success); }
 .dot-offline { background: var(--error); }
+.dot-checking { background: var(--gram-faint); }
 .dot-syncing { background: var(--udaan-orange); animation: pulse 1.5s infinite; }
 
 @keyframes pulse {
@@ -197,6 +198,7 @@ body {
 
 .badge-blue { background: #F0F3F4; color: #5A6B75; }
 .badge-slate { background: #F6F5F1; color: #6E777E; }
+.badge-amber { background: #F7F3EC; color: #8A7350; }
 
 /* ─── Camera / viewfinder ─── */
 
@@ -270,22 +272,154 @@ button {
 }
 
 .btn-shutter {
-  width: 60px;
-  height: 60px;
+  width: 68px;
+  height: 68px;
   border-radius: 50%;
   background: var(--udaan-white);
   border: 3px solid var(--udaan-orange);
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 0 auto;
+  margin: 0;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.btn-shutter:disabled {
+  opacity: 0.45;
 }
 
 .btn-shutter-inner {
-  width: 44px;
-  height: 44px;
+  width: 50px;
+  height: 50px;
   border-radius: 50%;
   background: var(--udaan-orange);
+}
+
+.capture-shutter-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  margin-top: 16px;
+  min-height: 72px;
+}
+
+.capture-shutter-row .btn-shutter {
+  grid-column: 2;
+  justify-self: center;
+}
+
+.capture-count {
+  grid-column: 3;
+  justify-self: end;
+  align-self: center;
+  min-width: 3.25rem;
+  text-align: right;
+  font-weight: 800;
+  font-size: 1.35rem;
+  line-height: 1;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+
+.capture-count span {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.milestone-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.milestone-progress-count {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: var(--udaan-navy);
+  font-variant-numeric: tabular-nums;
+  background: var(--gram-sage);
+  border: 1px solid var(--gram-sage-muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.milestone-progress-track {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.milestone-progress-step {
+  border: 1px solid var(--gram-sage-muted);
+  border-radius: 12px;
+  padding: 10px 8px;
+  background: var(--gram-sage);
+  min-height: 78px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.milestone-progress-step strong {
+  font-size: 0.78rem;
+  line-height: 1.25;
+  color: var(--gram-ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.milestone-progress-label {
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--udaan-blue);
+}
+
+.milestone-progress-meta {
+  margin-top: auto;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--gram-muted);
+}
+
+.milestone-progress-step.is-past {
+  background: #eef3f1;
+  border-color: var(--gram-sage-muted);
+}
+
+.milestone-progress-step.is-current {
+  border-color: var(--udaan-navy);
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(43, 62, 65, 0.08);
+}
+
+.milestone-progress-step.is-current .milestone-progress-label {
+  color: var(--udaan-navy);
+}
+
+.milestone-progress-step.is-current .milestone-progress-meta {
+  color: var(--status-online);
+}
+
+.milestone-progress-step.is-next {
+  background: #fff;
+  border-color: var(--gram-border);
+}
+
+.milestone-progress-step.is-empty strong {
+  color: var(--gram-faint);
+  font-weight: 600;
 }
 
 .btn-outline {
@@ -496,12 +630,118 @@ input:focus, select:focus, textarea:focus {
   padding: 4px 8px;
   border-radius: 4px;
   text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-synced { background: #F1F6F3; color: #4F6B5C; }
 .status-pending { background: #F7F3EC; color: #8A7350; }
 .status-syncing { background: #F0F3F4; color: #5A6B75; }
 .status-failed { background: #F8F1F1; color: #8C5555; }
+
+.field-overview-copy {
+  margin: 0 0 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.field-overview-milestones {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.field-overview-stat {
+  background: var(--gram-sage);
+  border: 1px solid var(--gram-sage-muted);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.field-overview-stat strong {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--gram-ink);
+  line-height: 1.1;
+}
+
+.field-overview-stat span {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+.field-overview-empty,
+.field-empty-state {
+  margin: 8px 0 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  padding: 8px 4px;
+}
+
+.field-overview-attention {
+  margin: 10px 0 0;
+  font-size: 0.78rem;
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.field-progress {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.field-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.field-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--gram-border);
+  overflow: hidden;
+}
+
+.field-progress-fill {
+  height: 100%;
+  background: var(--udaan-navy);
+  border-radius: inherit;
+  min-width: 0;
+}
+
+.ledger-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.ledger-actions-row {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.chip-action {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 0.78rem;
+}
 
 /* ─── Manager / dashboard shell ─── */
 
@@ -987,6 +1227,13 @@ div[data-nextjs-dev-tools-menu] {
   line-height: 1.2;
 }
 
+.field-hub-welcome-meta {
+  margin: 4px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
 .field-hub-welcome-status {
   margin: 3px 0 0;
   font-size: 0.68rem;
@@ -1062,6 +1309,10 @@ div[data-nextjs-dev-tools-menu] {
 
 .field-hub-avatar-status.is-online {
   background: var(--status-online);
+}
+
+.field-hub-avatar-status.is-checking {
+  background: var(--gram-faint);
 }
 
 .field-hub-avatar-status.is-offline {
@@ -1222,7 +1473,9 @@ div[data-nextjs-dev-tools-menu] {
   color: var(--gram-muted);
 }
 
+.attendance-card .btn-attendance-mark,
 .attendance-card button {
+  min-height: 44px;
   width: 100%;
 }
 
@@ -1339,9 +1592,22 @@ div[data-nextjs-dev-tools-menu] {
 
 .attendance-capture-actions {
   display: grid;
-  grid-template-columns: 1fr 1.4fr;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  min-height: 48px;
+}
+
+.attendance-capture-actions .btn-primary {
+  grid-column: 2;
+  justify-self: center;
+  min-width: 10rem;
+}
+
+.attendance-capture-actions .capture-count {
+  grid-column: 3;
+  justify-self: end;
 }
 
 .attendance-sealed-thumbs {

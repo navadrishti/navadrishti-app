@@ -150,7 +150,7 @@ describe("POST /api/attendance/[assignmentId]", () => {
     expect(response.status).toBe(409);
   });
 
-  describe("daily service offer rentals", () => {
+  describe("service offers are not field-attendance", () => {
     const offerRental = {
       id: "as-1",
       target_type: "service_offer",
@@ -166,47 +166,31 @@ describe("POST /api/attendance/[assignmentId]", () => {
       meta: {},
     };
 
-    it("lets the client mark the provider present for one billed day", async () => {
+    it("refuses client daily service-offer attendance marks", async () => {
       fake.reset({
         "users.select": [activeUser],
-        "service_engagement_assignments.select": [{ data: offerRental }, { data: { meta: {} } }],
-        "service_attendance_entries.select": [
-          { data: null },
-          { data: [{ attendance_date: today, attendance_status: "present", amount_due: 800, payment_status: "pending" }] },
-        ],
-        "service_attendance_entries.insert": [{ data: { id: "att-2" } }],
+        "service_engagement_assignments.select": [{ data: offerRental }],
       });
 
       const response = await POST(attendanceRequest({ attendanceDate: today, units: "5" }), context);
-      expect(response.status).toBe(201);
-      const [insert] = fake.find("service_attendance_entries", "insert");
-      expect(insert.payload).toMatchObject({
-        units: 1,
-        amount_due: 800,
-        payment_status: "pending",
-        application_table: "service_clients",
-        marked_by_user_id: 7,
-        marked_for_user_id: 3,
+      expect(response.status).toBe(422);
+      await expect(response.json()).resolves.toMatchObject({
+        error: expect.stringMatching(/delivery workflow/i),
       });
-    });
-
-    it("refuses the provider marking their own attendance", async () => {
-      fake.reset({
-        "users.select": [activeUser],
-        "service_engagement_assignments.select": [{ data: { ...offerRental, owner_user_id: 7, assignee_user_id: 4 } }],
-      });
-      const response = await POST(attendanceRequest(), context);
-      expect(response.status).toBe(403);
       expect(fake.find("service_attendance_entries", "insert")).toHaveLength(0);
     });
 
-    it("does not bill CSR capability rentals through attendance", async () => {
+    it("refuses CSR capability attendance marks from the field app", async () => {
       fake.reset({
         "users.select": [activeUser],
-        "service_engagement_assignments.select": [{ data: { ...offerRental, meta: { flow: "csr_capability_rental" } } }],
+        "service_engagement_assignments.select": [
+          { data: { ...offerRental, meta: { flow: "csr_capability_rental", campaign_id: "c-1" } } },
+        ],
       });
-      const response = await POST(attendanceRequest(), context);
+
+      const response = await POST(attendanceRequest({ attendanceDate: today }), context);
       expect(response.status).toBe(422);
+      expect(fake.find("service_attendance_entries", "insert")).toHaveLength(0);
     });
   });
 
@@ -221,4 +205,42 @@ describe("POST /api/attendance/[assignmentId]", () => {
     expect(response.status).toBe(422);
     expect(fake.find("service_attendance_entries", "insert")).toHaveLength(0);
   });
+
+  it.each(["pending", "assigned", "paused", "cancelled"])(
+    "refuses marks when assignment status is %s",
+    async (status) => {
+      fake.reset({
+        "users.select": [activeUser],
+        "service_engagement_assignments.select": [{ data: { ...campaignAssignment, status } }],
+        "campaigns.select": [{ data: campaign }],
+      });
+
+      const response = await POST(attendanceRequest(), context);
+      expect(response.status).toBe(422);
+      expect(fake.find("service_attendance_entries", "insert")).toHaveLength(0);
+    }
+  );
+
+  it.each(["active", "in_progress"])(
+    "allows marks when assignment status is %s",
+    async (status) => {
+      fake.reset({
+        "users.select": [activeUser],
+        "service_engagement_assignments.select": [
+          { data: { ...campaignAssignment, status } },
+          { data: { meta: {} } },
+        ],
+        "campaigns.select": [{ data: campaign }],
+        "service_attendance_entries.select": [
+          { data: null },
+          { data: [{ attendance_date: today, attendance_status: "present", amount_due: 0 }] },
+        ],
+        "service_attendance_entries.insert": [{ data: { id: "att-ok" } }],
+      });
+
+      const response = await POST(attendanceRequest({ attendanceDate: today }), context);
+      expect(response.status).toBe(201);
+      expect(fake.find("service_attendance_entries", "insert")).toHaveLength(1);
+    }
+  );
 });

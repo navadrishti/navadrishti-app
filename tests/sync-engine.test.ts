@@ -142,4 +142,106 @@ describe("processSyncQueue", () => {
     expect(result.processed).toBe(0);
     expect(apiFetch).not.toHaveBeenCalled();
   });
+
+  it("treats attendance 409 already-marked as idempotent day-slot sync success", async () => {
+    queueAttendance();
+    apiFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: false, error: "Attendance for today has already been marked and cannot be edited" }),
+        { status: 409 }
+      )
+    );
+
+    const result = await processSyncQueue("7");
+
+    expect(result).toMatchObject({ processed: 1, succeeded: 1, failed: 0 });
+    expect(db.syncQueue.rows.size).toBe(0);
+    // Successful/idempotent attendance sync removes the outbox row.
+    expect(db.attendanceOutbox.rows.has("att-1")).toBe(false);
+  });
+
+  it("deletes local evidence media only after the server confirms upload", async () => {
+    void db.recordsLocal.put({
+      id: "rec-media",
+      userId: "7",
+      beneficiaryName: "A",
+      interactionType: "visit",
+      notes: "",
+      projectId: "p-1",
+      milestoneId: "m-1",
+      status: "pending",
+      submittedAtDevice: "2026-09-28T10:00:00.000Z",
+      deviceId: "dev",
+      userName: "NGO",
+      gpsLat: 19,
+      gpsLng: 72,
+    });
+    void db.mediaLocal.put({
+      id: "media-1",
+      recordId: "rec-media",
+      fileName: "shot.jpg",
+      mimeType: "image/jpeg",
+      size: 12,
+      kind: "image",
+      blob: new Blob(["x"], { type: "image/jpeg" }),
+      // Leave unset so sync seals from the live blob hash (integrity path).
+      proofHash: null,
+      createdAt: "2026-09-28T10:00:00.000Z",
+    });
+    void db.syncQueue.put(
+      queueItem({
+        id: "q-media",
+        recordId: "rec-media",
+        kind: "evidence",
+        userId: "7",
+      })
+    );
+    apiFetch.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, eventId: "rec-media" }), { status: 200 })
+    );
+
+    const result = await processSyncQueue("7");
+
+    expect(result).toMatchObject({ processed: 1, succeeded: 1, failed: 0 });
+    expect(db.syncQueue.rows.size).toBe(0);
+    expect(db.recordsLocal.rows.get("rec-media")?.status).toBe("synced");
+    expect(db.mediaLocal.rows.has("media-1")).toBe(false);
+  });
+
+  it("retries evidence when the server returns a chain-tip 409 (not treated as success)", async () => {
+    void db.recordsLocal.put({
+      id: "rec-1",
+      userId: "7",
+      beneficiaryName: "A",
+      interactionType: "visit",
+      notes: "",
+      projectId: "p-1",
+      milestoneId: "m-1",
+      status: "pending",
+      submittedAtDevice: "2026-09-28T10:00:00.000Z",
+      deviceId: "dev",
+      userName: "NGO",
+      gpsLat: 19,
+      gpsLng: 72,
+    });
+    void db.syncQueue.put(
+      queueItem({
+        id: "q-ev",
+        recordId: "rec-1",
+        kind: "evidence",
+        userId: "7",
+      })
+    );
+    apiFetch.mockResolvedValue(
+      new Response(JSON.stringify({ ok: false, error: "Evidence chain tip changed." }), { status: 409 })
+    );
+
+    const result = await processSyncQueue("7");
+
+    expect(result).toMatchObject({ processed: 1, succeeded: 0, failed: 1 });
+    const item = db.syncQueue.rows.get("q-ev")!;
+    expect(item.nextAttemptAt).toBeGreaterThan(Date.now());
+    expect(item.lastError).toMatch(/chain tip/i);
+    expect(db.recordsLocal.rows.get("rec-1")?.status).toBe("failed");
+  });
 });

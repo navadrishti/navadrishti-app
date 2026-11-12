@@ -7,6 +7,7 @@ import { getSupabaseClient } from "@/lib/supabase-browser";
 import { db } from "@/lib/db";
 import type { AppSession } from "@/lib/types";
 import { ProductBrand } from "@/components/product-brand";
+import { LoginBootstrapSkeleton } from "@/components/skeleton";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -19,6 +20,8 @@ type AppContextValue = {
   configured: boolean;
   missingEnv: string[];
   session: AppSession | null;
+  /** False until the first client effect reads navigator.onLine (avoids offline flash). */
+  connectivityReady: boolean;
   isOnline: boolean;
   isSyncing: boolean;
   lastSync: SyncRunResult | null;
@@ -78,6 +81,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [configured, setConfigured] = useState(true);
   const [missingEnv, setMissingEnv] = useState<string[]>([]);
   const [session, setSession] = useState<AppSession | null>(null);
+  const [connectivityReady, setConnectivityReady] = useState(false);
   const [isOnline, setIsOnline] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSync, setLastSync] = useState<SyncRunResult | null>(null);
@@ -104,6 +108,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       .catch(() => setConfigured(true));
 
     setIsOnline(window.navigator.onLine);
+    setConnectivityReady(true);
 
     const handleOnlineState = () => setIsOnline(window.navigator.onLine);
     window.addEventListener("online", handleOnlineState);
@@ -179,7 +184,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     void apiFetch("/api/session")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (cancelled || !data?.profile || !session) return;
+        if (cancelled || !session) return;
+
+        // Server cleared an invalid/deactivated Field Officer (or other) session.
+        if (data && data.session === null) {
+          window.localStorage.removeItem(SESSION_KEY);
+          setSession(null);
+          return;
+        }
+
+        if (!data?.profile) return;
 
         const avatarUrl =
           typeof data.profile.avatarUrl === "string" || data.profile.avatarUrl === null
@@ -190,22 +204,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             ? data.profile.name.trim()
             : session.name;
 
-        if (avatarUrl === session.avatarUrl && name === session.name) {
-          return;
-        }
+        const serverSession =
+          data.session && typeof data.session === "object" ? (data.session as AppSession) : null;
 
         const nextSession: AppSession = {
           ...session,
+          ...(serverSession || {}),
           name,
-          ngoName: name,
+          ngoName:
+            session.role === "field_officer"
+              ? serverSession?.ngoName || session.ngoName
+              : name,
           avatarUrl: avatarUrl ?? session.avatarUrl ?? null,
+          mustChangePassword:
+            serverSession?.mustChangePassword ??
+            (typeof data.mustChangePassword === "boolean"
+              ? data.mustChangePassword
+              : session.mustChangePassword),
+          permissions: serverSession?.permissions ?? session.permissions,
+          identityId: serverSession?.identityId ?? session.identityId,
         };
 
         window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
         setSession(nextSession);
       })
       .catch(() => {
-        // Profile refresh is best-effort; cached session remains usable.
+        // Profile refresh is best-effort; cached session remains usable offline.
       });
 
     return () => {
@@ -243,6 +267,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       configured,
       missingEnv,
       session,
+      connectivityReady,
       isOnline,
       isSyncing,
       lastSync,
@@ -250,7 +275,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       signOut,
       syncNow
     }),
-    [configured, isOnline, isSyncing, lastSync, missingEnv, ready, session, applySession, signOut, syncNow]
+    [
+      configured,
+      connectivityReady,
+      isOnline,
+      isSyncing,
+      lastSync,
+      missingEnv,
+      ready,
+      session,
+      applySession,
+      signOut,
+      syncNow,
+    ]
   );
 
   return (
@@ -283,12 +320,14 @@ function InstallGate({ children }: { children: React.ReactNode }) {
       deferredPrompt.current = event as BeforeInstallPromptEvent;
       setCanPrompt(true);
     };
+    const onInstalled = () => setInstalled(true);
 
     window.addEventListener("beforeinstallprompt", onBeforeInstall);
-    window.addEventListener("appinstalled", () => setInstalled(true));
+    window.addEventListener("appinstalled", onInstalled);
 
     return () => {
       window.removeEventListener("beforeinstallprompt", onBeforeInstall);
+      window.removeEventListener("appinstalled", onInstalled);
     };
   }, []);
 
@@ -306,7 +345,7 @@ function InstallGate({ children }: { children: React.ReactNode }) {
     }
   }
 
-  if (!ready) return null;
+  if (!ready) return <LoginBootstrapSkeleton />;
 
   const isLocalDev =
     typeof window !== "undefined" &&
