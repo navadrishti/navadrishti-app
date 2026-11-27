@@ -29,10 +29,7 @@ export async function GET(request: NextRequest) {
 
   if (session.role === "field_officer") {
     try {
-      const clientDeviceId = request.headers.get("x-device-id");
-      const access = await resolveFieldOfficerAssignedProjects(session, {
-        clientDeviceId,
-      });
+      const access = await resolveFieldOfficerAssignedProjects(session);
       if (!access.ok) {
         return NextResponse.json(
           { ok: false, error: access.error },

@@ -6,7 +6,6 @@ import { FieldOfficerEvidence } from "@/components/field-officer-evidence";
 import { AppFooter, ProductBrand } from "@/components/product-brand";
 import { LoginBootstrapSkeleton } from "@/components/skeleton";
 import { apiFetch } from "@/lib/env";
-import { getDeviceId } from "@/lib/utils";
 import type { AppSession } from "@/lib/types";
 import { useState } from "react";
 
@@ -168,7 +167,7 @@ export default function HomePage() {
       const res = await apiFetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, device_id: getDeviceId() }),
+        body: JSON.stringify({ email, password }),
       });
 
       const data = await res.json();

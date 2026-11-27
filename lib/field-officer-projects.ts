@@ -11,18 +11,15 @@ export type FieldOfficerProjectAccess =
       session: AppSession;
       identity: FieldOfficerIdentityRow;
       projectIds: string[];
-      /** Non-authoritative installation / offline-queue metadata only. */
-      deviceId: string | null;
     }
   | { ok: false; status: 401 | 403; error: string; code?: string };
 
 /**
  * Revalidate FO session + parent NGO identity, then return active assigned project IDs.
- * Device ID is never an authorization credential.
  */
 export async function resolveFieldOfficerAssignedProjects(
   session: AppSession,
-  options: { allowPasswordChangePending?: boolean; clientDeviceId?: string | null } = {}
+  options: { allowPasswordChangePending?: boolean } = {}
 ): Promise<FieldOfficerProjectAccess> {
   const evaluation = await evaluateFieldOfficerSession(session, {
     allowPasswordChangePending: options.allowPasswordChangePending,
@@ -51,17 +48,11 @@ export async function resolveFieldOfficerAssignedProjects(
     .map((row) => String(row.project_id || "").trim())
     .filter(Boolean);
 
-  const deviceId =
-    String(options.clientDeviceId || "").trim() ||
-    String(evaluation.session.deviceId || "").trim() ||
-    null;
-
   return {
     ok: true,
     session: evaluation.session,
     identity: evaluation.identity,
     projectIds,
-    deviceId,
   };
 }
 
@@ -72,9 +63,9 @@ export async function resolveFieldOfficerAssignedProjects(
 export async function assertFieldOfficerAssignedToProject(
   session: AppSession,
   projectId: string,
-  options: { allowPasswordChangePending?: boolean; clientDeviceId?: string | null } = {}
+  options: { allowPasswordChangePending?: boolean } = {}
 ): Promise<
-  | { ok: true; session: AppSession; identity: FieldOfficerIdentityRow; deviceId: string | null }
+  | { ok: true; session: AppSession; identity: FieldOfficerIdentityRow }
   | { ok: false; status: 401 | 403 | 404; error: string; code?: string }
 > {
   const access = await resolveFieldOfficerAssignedProjects(session, options);
@@ -109,6 +100,5 @@ export async function assertFieldOfficerAssignedToProject(
     ok: true,
     session: access.session,
     identity: access.identity,
-    deviceId: access.deviceId,
   };
 }

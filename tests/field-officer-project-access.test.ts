@@ -25,7 +25,6 @@ function session(overrides: Partial<AppSession> = {}): AppSession {
     role: "field_officer",
     issuedAt: now,
     expiresAt: now + 60_000,
-    deviceId: "dev-1",
     createdAt: new Date(now).toISOString(),
     identityId: "fo-1",
     mustChangePassword: false,
@@ -80,22 +79,6 @@ describe("Field Officer project authorization helpers", () => {
           },
         },
       ],
-      "field_devices.select": [
-        {
-          data: {
-            id: "dev-row-1",
-            device_id: "dev-1",
-            ngo_user_id: 21,
-            assigned_user_id: 90,
-            device_label: "Phone",
-            status: "active",
-            registered_at: "2026-11-01T00:00:00Z",
-            last_seen_at: null,
-            revoked_at: null,
-          },
-        },
-      ],
-      "field_devices.update": [{ data: { id: "dev-row-1" } }],
       "ngo_field_officer_project_assignments.select": [
         { data: [{ project_id: "proj-1", status: "active", ngo_user_id: 21 }] },
       ],
@@ -104,6 +87,8 @@ describe("Field Officer project authorization helpers", () => {
 
     const access = await assertFieldOfficerAssignedToProject(session(), "proj-1");
     expect(access.ok).toBe(true);
+    expect(fake.find("field_devices", "select")).toHaveLength(0);
+    expect(access).not.toHaveProperty("deviceId");
   });
 
   it("rejects unassigned, inactive, and tampered project IDs", async () => {
@@ -145,22 +130,6 @@ describe("Field Officer project authorization helpers", () => {
           },
         },
       ],
-      "field_devices.select": [
-        {
-          data: {
-            id: "dev-row-1",
-            device_id: "dev-1",
-            ngo_user_id: 21,
-            assigned_user_id: 90,
-            device_label: "Phone",
-            status: "active",
-            registered_at: "2026-11-01T00:00:00Z",
-            last_seen_at: null,
-            revoked_at: null,
-          },
-        },
-      ],
-      "field_devices.update": [{ data: { id: "dev-row-1" } }],
       "ngo_field_officer_project_assignments.select": [
         { data: [{ project_id: "proj-1", status: "active", ngo_user_id: 21 }] },
       ],
@@ -207,22 +176,6 @@ describe("Field Officer project authorization helpers", () => {
           },
         },
       ],
-      "field_devices.select": [
-        {
-          data: {
-            id: "dev-row-1",
-            device_id: "dev-1",
-            ngo_user_id: 21,
-            assigned_user_id: 90,
-            device_label: "Phone",
-            status: "active",
-            registered_at: "2026-11-01T00:00:00Z",
-            last_seen_at: null,
-            revoked_at: null,
-          },
-        },
-      ],
-      "field_devices.update": [{ data: { id: "dev-row-1" } }],
       "ngo_field_officer_project_assignments.select": [
         { data: [{ project_id: "proj-1", status: "active", ngo_user_id: 21 }] },
       ],
@@ -270,22 +223,6 @@ describe("Field Officer project authorization helpers", () => {
           },
         },
       ],
-      "field_devices.select": [
-        {
-          data: {
-            id: "dev-row-1",
-            device_id: "dev-1",
-            ngo_user_id: 21,
-            assigned_user_id: 90,
-            device_label: "Phone",
-            status: "active",
-            registered_at: "2026-11-01T00:00:00Z",
-            last_seen_at: null,
-            revoked_at: null,
-          },
-        },
-      ],
-      "field_devices.update": [{ data: { id: "dev-row-1" } }],
       "ngo_field_officer_project_assignments.select": [{ data: [] }],
     });
 

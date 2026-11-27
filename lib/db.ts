@@ -109,6 +109,10 @@ class NavadrishtiDB extends Dexie {
       attendanceOutbox: "id, userId, assignmentId, attendanceDate, status",
     });
 
+    this.version(12).stores({
+      recordsLocal: "id, status, userId, projectId, milestoneId, submittedAtDevice",
+    });
+
     this.on("blocked", () => {
       console.warn("[Dexie] Database upgrade blocked! Please close other tabs of this app.");
     });

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/env";
-import { getDeviceId } from "@/lib/utils";
 import { db } from "@/lib/db";
 import { randomUUID, calculateHash } from "@/lib/crypto";
 import { processSyncQueue } from "@/lib/sync-engine";
@@ -147,9 +146,7 @@ export function FieldOfficerEvidence({
     setLoading(true);
     setLoadError(null);
     try {
-      const response = await apiFetch("/api/projects", {
-        headers: { "x-device-id": getDeviceId() },
-      });
+      const response = await apiFetch("/api/projects");
       const body = await response.json().catch(() => null);
       if (!response.ok || !body?.ok) {
         setLoadError(body?.error || "Unable to load assigned projects.");
@@ -285,8 +282,6 @@ export function FieldOfficerEvidence({
       const coords = await getCurrentPosition();
       const recordId = randomUUID();
       const createdAt = new Date().toISOString();
-      const deviceId = getDeviceId();
-
       const mediaEntries: LocalMediaRecord[] = [];
       for (const item of captured) {
         const actualHash = (await calculateHash(item.blob)).toLowerCase();
@@ -308,7 +303,6 @@ export function FieldOfficerEvidence({
 
       const record: LocalRecord = {
         id: recordId,
-        deviceId,
         userId: session.id,
         userName: session.name,
         projectId: selectedProject.id,

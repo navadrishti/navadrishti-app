@@ -78,7 +78,6 @@ function evidenceRequest(opts: { token?: string | null } = {}) {
         notes: "Org field visit",
         beneficiaryName: "Ravi",
         interactionType: "visit",
-        deviceId: "dev-1",
         locationLatitude: 19.1,
         locationLongitude: 72.8,
         capturedAt: "2026-09-28T10:00:00.000Z",

@@ -81,8 +81,7 @@ async function comparePassword(inputPassword: string, storedPassword: string) {
 
 export async function authenticateNgoWithPassword(
   email: string,
-  password: string,
-  deviceId?: string
+  password: string
 ): Promise<NgoAuthResult> {
   const normalizedEmail = email.trim().toLowerCase();
   const supabase = getServerSupabaseClient();
@@ -95,7 +94,7 @@ export async function authenticateNgoWithPassword(
   const { data: userRow, error: userError } = await supabase
     .from("users")
     .select(
-      "id, name, email, password, user_type, email_verified, phone_verified, verification_status, account_status, locked_until, device_id, profile_image, profile_data"
+      "id, name, email, password, user_type, email_verified, phone_verified, verification_status, account_status, locked_until, profile_image, profile_data"
     )
     .ilike("email", normalizedEmail)
     .maybeSingle();

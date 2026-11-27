@@ -92,7 +92,6 @@ async function syncEvidenceToApi(recordId: string, media: LocalMediaRecord[]) {
     userType: "ngo",
     gpsLat: record.gpsLat,
     gpsLng: record.gpsLng,
-    deviceId: record.deviceId,
     userName: record.userName,
     milestoneId: record.milestoneId,
     mediaProofHashes,

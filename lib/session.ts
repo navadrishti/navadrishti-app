@@ -12,7 +12,6 @@ export interface AppSession {
   role: SessionRole;
   issuedAt: number;
   expiresAt: number;
-  deviceId: string;
   createdAt: string;
   avatarUrl?: string | null;
   identityId?: string;
@@ -72,7 +71,7 @@ export function verifySessionToken(token: string | undefined) {
   }
 
   try {
-    const parsed = JSON.parse(decode(payload)) as AppSession;
+    const parsed = JSON.parse(decode(payload)) as AppSession & { deviceId?: unknown };
 
     if (!parsed || typeof parsed !== "object") {
       return null;
@@ -82,6 +81,7 @@ export function verifySessionToken(token: string | undefined) {
       return null;
     }
 
+    delete parsed.deviceId;
     return parsed;
   } catch {
     return null;

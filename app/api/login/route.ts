@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
   }
 
   const body = (await request.json().catch(() => null)) as
-    | { email?: string; password?: string; device_id?: string }
+    | { email?: string; password?: string }
     | null;
 
   const email = body?.email?.trim() ?? "";
@@ -58,9 +58,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const deviceId = body?.device_id ?? "";
-
-  const authResult = await authenticateNgoWithPassword(email, password, deviceId);
+  const authResult = await authenticateNgoWithPassword(email, password);
 
   if (
     !authResult.allowed ||
@@ -92,7 +90,6 @@ export async function POST(request: NextRequest) {
     role,
     issuedAt: now,
     expiresAt: now + maxAge * 1000,
-    deviceId,
     createdAt: new Date().toISOString(),
     avatarUrl: authResult.avatarUrl ?? null,
     ...(role === "field_officer"
@@ -115,7 +112,6 @@ export async function POST(request: NextRequest) {
       ngoName: session.ngoName,
       email: session.email,
       role: session.role,
-      deviceId: session.deviceId,
       createdAt: session.createdAt,
       avatarUrl: session.avatarUrl ?? null,
       identityId: session.identityId,

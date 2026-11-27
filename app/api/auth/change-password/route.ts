@@ -149,7 +149,6 @@ export async function POST(request: NextRequest) {
       ngoName: nextSession.ngoName,
       email: nextSession.email,
       role: nextSession.role,
-      deviceId: nextSession.deviceId,
       createdAt: nextSession.createdAt,
       avatarUrl: nextSession.avatarUrl ?? null,
       identityId: nextSession.identityId,

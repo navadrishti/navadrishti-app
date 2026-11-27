@@ -24,7 +24,6 @@ import {
   saveAttendanceCache,
 } from "@/lib/sync-engine";
 import {
-  getDeviceId,
   getCurrentPosition,
   getLocalDateStringClient,
   formatDeviceDateTime,
@@ -171,12 +170,7 @@ export function FieldConsole() {
   >([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitState, setSubmitState] = useState<{ tone: "success" | "error"; message: string } | null>(null);
-  const [deviceId, setDeviceId] = useState("");
   const [activePreviewUrl, setActivePreviewUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    setDeviceId(getDeviceId());
-  }, []);
 
   const canEvidence = session?.role === "ngo";
   const isIndividual = session?.role === "individual";
@@ -500,9 +494,6 @@ export function FieldConsole() {
     setSubmitState(null);
 
     try {
-      const resolvedDeviceId = deviceId || getDeviceId();
-      if (!deviceId) setDeviceId(resolvedDeviceId);
-
       const coords = evidenceCoords || (await getCurrentPosition());
       if (!coords) throw new Error("Could not acquire GPS signal. Check permissions.");
       if (!evidenceCoords) setEvidenceCoords(coords);
@@ -532,7 +523,6 @@ export function FieldConsole() {
 
       const record: LocalRecord = {
         id: recordId,
-        deviceId: resolvedDeviceId,
         userId: session.id,
         userName: session.name,
         projectId: data.projectId,
@@ -752,9 +742,9 @@ export function FieldConsole() {
           />
 
           <section className="card-section">
-            <span className="section-title">Recent device history</span>
+            <span className="section-title">Recent field activity</span>
             <p className="field-overview-copy">
-              Status below is upload state on this device, not platform approval.
+              Status below is the upload state for your saved evidence.
             </p>
             <div style={{ display: "grid", gap: "8px" }}>
               {recordsLoading ? (

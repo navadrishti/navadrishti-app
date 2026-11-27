@@ -14,7 +14,6 @@ export type AppSession = {
   issuedAt: number;
   expiresAt: number;
   createdAt: string;
-  deviceId?: string;
   avatarUrl?: string | null;
   /** Present for Field Officer sessions — parent NGO comes from DB identity. */
   identityId?: string;
@@ -36,7 +35,6 @@ export type MilestoneStatus =
 
 export type LocalRecord = {
   id: string;
-  deviceId: string;
   userId: string;
   userName: string;
   projectId: string | null;
