@@ -1,5 +1,3 @@
-import { randomUUID } from "@/lib/crypto";
-
 /**
  * Get the current GPS position as a promise.
  */
@@ -69,24 +67,6 @@ export function formatBytes(size: number) {
     return `${(size / 1024).toFixed(1)} KB`;
   }
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-const DEVICE_KEY = "navadrishti.device-id";
-
-/** Stable per-device ID for NGO hardware binding. */
-export function getDeviceId() {
-  if (typeof window === "undefined") {
-    return "server-render";
-  }
-
-  const existing = window.localStorage.getItem(DEVICE_KEY);
-  if (existing) {
-    return existing;
-  }
-
-  const created = randomUUID();
-  window.localStorage.setItem(DEVICE_KEY, created);
-  return created;
 }
 
 function safeProfileJson(value: unknown): Record<string, unknown> {

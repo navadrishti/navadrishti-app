@@ -50,7 +50,6 @@ function evidenceRequest(
       data: {
         milestoneId: "m-1",
         projectId: "p-1",
-        deviceId: "dev-1",
         notes: "Visited site",
         gpsLat: 19.1,
         gpsLng: 72.8,
@@ -98,7 +97,7 @@ describe("POST /api/evidence", () => {
       project_id: "p-1",
       uploaded_by: 7,
       ngo_user_id: 7,
-      device_id: "dev-1",
+      device_id: "unknown",
       description: "Visited site",
       gps_lat: 19.1,
       gps_long: 72.8,

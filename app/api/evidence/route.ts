@@ -26,6 +26,9 @@ import { IngestionPayload, SyncApiResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
 
+// Existing evidence tables require device_id; never source this placeholder from a client.
+const LEGACY_DEVICE_ID_PLACEHOLDER = "unknown";
+
 function fail(error: string, status: number) {
   return NextResponse.json<SyncApiResponse>({ ok: false, error }, { status });
 }
@@ -46,7 +49,6 @@ type EvidenceActor =
       role: "ngo";
       ngoUserId: number;
       uploadedBy: number;
-      deviceIdFallback: string;
       source: "field_pwa";
       identity: null;
     }
@@ -54,7 +56,6 @@ type EvidenceActor =
       role: "field_officer";
       ngoUserId: number;
       uploadedBy: number;
-      deviceIdFallback: string;
       source: "field_officer_pwa";
       identity: FieldOfficerIdentityRow;
     };
@@ -102,9 +103,6 @@ export async function POST(request: NextRequest) {
 
     // Never trust client-supplied ownership / officer identity fields.
     const supabase = getServerSupabaseClient();
-    const clientDeviceId =
-      request.headers.get("x-device-id") || String(data.deviceId || "").trim() || null;
-
     let actor: EvidenceActor | null = null;
 
     if (session.role === "ngo") {
@@ -115,7 +113,6 @@ export async function POST(request: NextRequest) {
         role: "ngo",
         ngoUserId: ngoId,
         uploadedBy: ngoId,
-        deviceIdFallback: String(data.deviceId || "unknown"),
         source: "field_pwa",
         identity: null,
       };
@@ -178,7 +175,6 @@ export async function POST(request: NextRequest) {
     if (session.role === "field_officer") {
       const access = await assertFieldOfficerAssignedToProject(session, projectId, {
         allowPasswordChangePending: false,
-        clientDeviceId,
       });
       if (!access.ok) {
         return fail(access.error, access.status === 404 ? 404 : access.status);
@@ -194,7 +190,6 @@ export async function POST(request: NextRequest) {
         role: "field_officer",
         ngoUserId: access.identity.ngo_user_id,
         uploadedBy: access.identity.user_id,
-        deviceIdFallback: access.deviceId || clientDeviceId || "unknown",
         source: "field_officer_pwa",
         identity: access.identity,
       };
@@ -282,6 +277,7 @@ export async function POST(request: NextRequest) {
       uploaded_by: _ignoreUploadedBy,
       ngo_user_id: _ignoreNgoUserId,
       field_officer_identity_id: _ignoreFoIdentity,
+      deviceId: _ignoreDeviceId,
       ...safeClientData
     } = data as Record<string, unknown>;
 
@@ -337,10 +333,6 @@ export async function POST(request: NextRequest) {
       mediaContentHashes,
     });
 
-    const resolvedDeviceId = String(
-      actor.role === "field_officer" ? actor.deviceIdFallback : data.deviceId || actor.deviceIdFallback
-    );
-
     if (milestone) {
       const immutableHash = evidenceImmutableHash(event_id);
       const { data: existingEvidence, error: existingEvidenceError } = await supabase
@@ -358,7 +350,7 @@ export async function POST(request: NextRequest) {
             project_id: project.id,
             uploaded_by: actor.uploadedBy,
             ngo_user_id: actor.ngoUserId,
-            device_id: resolvedDeviceId || "unknown",
+            device_id: LEGACY_DEVICE_ID_PLACEHOLDER,
             description: typeof data.notes === "string" && data.notes.trim() ? data.notes.trim() : null,
             gps_lat: finiteOrNull(data.gpsLat),
             gps_long: finiteOrNull(data.gpsLng),
@@ -433,7 +425,7 @@ export async function POST(request: NextRequest) {
         prev_hash: prevHash,
         user_id: session.email,
         ngo_id: actor.ngoUserId,
-        device_id: resolvedDeviceId || "unknown",
+        device_id: LEGACY_DEVICE_ID_PLACEHOLDER,
         timestamp: new Date().toISOString(),
       })
       .select("id")

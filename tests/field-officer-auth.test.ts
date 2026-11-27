@@ -95,7 +95,7 @@ function loginRequest(
   return new NextRequest("http://field.test/api/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, password, device_id: "dev-fo-1" }),
+    body: JSON.stringify({ email, password }),
   });
 }
 
@@ -115,7 +115,6 @@ function foSession(overrides: Record<string, unknown> = {}) {
     role: "field_officer" as const,
     issuedAt: now,
     expiresAt: now + 60 * 60 * 1000,
-    deviceId: "dev-fo-1",
     createdAt: new Date(now).toISOString(),
     identityId: "fo-1",
     mustChangePassword: false,
@@ -154,6 +153,7 @@ describe("Field Officer login", () => {
         mustChangePassword: false,
       },
     });
+    expect(body.session).not.toHaveProperty("deviceId");
     expect(body).not.toHaveProperty("debug");
     expect(response.headers.get("set-cookie")).toContain("navadrishti_session=");
 
@@ -228,7 +228,6 @@ describe("Field Officer login", () => {
         body: JSON.stringify({
           email: "ngo@example.org",
           password: "correct-horse",
-          device_id: "dev-1",
         }),
       })
     );
@@ -265,7 +264,6 @@ describe("Field Officer login", () => {
         body: JSON.stringify({
           email: "company@example.com",
           password: "correct-horse",
-          device_id: "dev-1",
         }),
       })
     );
@@ -307,86 +305,74 @@ describe("Field Officer session enforcement", () => {
     expect(body.session).toBeNull();
   });
 
-  it("returns only actively assigned projects for Field Officers", async () => {
-    const token = createSessionToken(foSession());
-    fake.reset({
-      "users.select": [
-        { data: officerUser() },
-        {
-          data: {
-            id: 21,
-            user_type: "ngo",
-            account_status: "active",
-            locked_until: null,
-            profile_data: {},
+  it.each([null, "unregistered-installation"])(
+    "returns only actively assigned projects without relying on device metadata (%s)",
+    async (clientDeviceId) => {
+      const token = createSessionToken(foSession());
+      fake.reset({
+        "users.select": [
+          { data: officerUser() },
+          {
+            data: {
+              id: 21,
+              user_type: "ngo",
+              account_status: "active",
+              locked_until: null,
+              profile_data: {},
+            },
           },
-        },
-      ],
-      "ngo_field_officer_identities.select": [{ data: officerIdentity() }],
-      "field_devices.select": [
-        {
-          data: {
-            id: "dev-row-1",
-            device_id: "dev-fo-1",
-            ngo_user_id: 21,
-            assigned_user_id: 90,
-            device_label: "Phone",
-            status: "active",
-            registered_at: "2026-11-01T00:00:00Z",
-            last_seen_at: null,
-            revoked_at: null,
+        ],
+        "ngo_field_officer_identities.select": [{ data: officerIdentity() }],
+        "ngo_field_officer_project_assignments.select": [
+          {
+            data: [
+              {
+                project_id: "proj-assigned",
+                status: "active",
+                ngo_user_id: 21,
+              },
+            ],
           },
-        },
-      ],
-      "field_devices.update": [{ data: { id: "dev-row-1" } }],
-      "ngo_field_officer_project_assignments.select": [
-        {
-          data: [
-            {
-              project_id: "proj-assigned",
-              status: "active",
-              ngo_user_id: 21,
-            },
-          ],
-        },
-      ],
-      "csr_projects.select": [
-        {
-          data: [
-            {
-              id: "proj-assigned",
-              title: "Assigned Project",
-              project_status: "active",
-              csr_project_milestones: [],
-              reference_points: [],
-            },
-            {
-              id: "proj-other",
-              title: "Other NGO Project",
-              project_status: "active",
-              csr_project_milestones: [],
-              reference_points: [],
-            },
-          ],
-        },
-      ],
-    });
+        ],
+        "csr_projects.select": [
+          {
+            data: [
+              {
+                id: "proj-assigned",
+                title: "Assigned Project",
+                project_status: "active",
+                csr_project_milestones: [],
+                reference_points: [],
+              },
+              {
+                id: "proj-other",
+                title: "Other NGO Project",
+                project_status: "active",
+                csr_project_milestones: [],
+                reference_points: [],
+              },
+            ],
+          },
+        ],
+      });
 
-    const response = await projectsGet(
-      withSessionCookie(
-        new NextRequest("http://field.test/api/projects", {
-          headers: { "x-device-id": "dev-fo-1" },
-        }),
-        token
-      )
-    );
-    const body = await response.json();
-    expect(response.status).toBe(200);
-    expect(body.role).toBe("field_officer");
-    expect(body.data).toEqual([
-      expect.objectContaining({ id: "proj-assigned", title: "Assigned Project" }),
-    ]);
-  });
+      const response = await projectsGet(
+        withSessionCookie(
+          new NextRequest("http://field.test/api/projects", {
+            headers: clientDeviceId ? { "x-device-id": clientDeviceId } : undefined,
+          }),
+          token
+        )
+      );
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      expect(body.role).toBe("field_officer");
+      expect(body.data).toEqual([
+        expect.objectContaining({ id: "proj-assigned", title: "Assigned Project" }),
+      ]);
+      expect(fake.find("field_devices", "select")).toHaveLength(0);
+    }
+  );
 
   it("returns an empty project list when the Field Officer has no active assignments", async () => {
     const token = createSessionToken(foSession());
@@ -404,29 +390,12 @@ describe("Field Officer session enforcement", () => {
         },
       ],
       "ngo_field_officer_identities.select": [{ data: officerIdentity() }],
-      "field_devices.select": [
-        {
-          data: {
-            id: "dev-row-1",
-            device_id: "dev-fo-1",
-            ngo_user_id: 21,
-            assigned_user_id: 90,
-            device_label: "Phone",
-            status: "active",
-            registered_at: "2026-11-01T00:00:00Z",
-            last_seen_at: null,
-            revoked_at: null,
-          },
-        },
-      ],
-      "field_devices.update": [{ data: { id: "dev-row-1" } }],
       "ngo_field_officer_project_assignments.select": [{ data: [] }],
     });
 
     const response = await projectsGet(
       withSessionCookie(
         new NextRequest("http://field.test/api/projects", {
-          headers: { "x-device-id": "dev-fo-1" },
         }),
         token
       )
@@ -457,7 +426,6 @@ describe("Field Officer session enforcement", () => {
     const response = await projectsGet(
       withSessionCookie(
         new NextRequest("http://field.test/api/projects", {
-          headers: { "x-device-id": "dev-fo-1" },
         }),
         token
       )
@@ -477,7 +445,6 @@ describe("Field Officer session enforcement", () => {
     const response = await projectsGet(
       withSessionCookie(
         new NextRequest("http://field.test/api/projects", {
-          headers: { "x-device-id": "dev-fo-1" },
         }),
         token
       )
@@ -485,7 +452,7 @@ describe("Field Officer session enforcement", () => {
     expect(response.status).toBe(403);
   });
 
-  it("allows Field Officer project listing when a legacy device row is revoked", async () => {
+  it("allows assigned Field Officer project listing without device metadata", async () => {
     const token = createSessionToken(foSession());
     fake.reset({
       "users.select": [
@@ -502,35 +469,23 @@ describe("Field Officer session enforcement", () => {
         },
       ],
       "ngo_field_officer_identities.select": [{ data: officerIdentity() }],
-      "field_devices.select": [
-        {
-          data: {
-            id: "dev-row-1",
-            device_id: "dev-fo-1",
-            ngo_user_id: 21,
-            assigned_user_id: 90,
-            device_label: "Phone",
-            status: "revoked",
-            registered_at: "2026-11-01T00:00:00Z",
-            last_seen_at: null,
-            revoked_at: "2026-11-07T00:00:00Z",
-          },
-        },
+      "ngo_field_officer_project_assignments.select": [
+        { data: [{ project_id: "proj-assigned", status: "active", ngo_user_id: 21 }] },
       ],
-      "ngo_field_officer_project_assignments.select": [{ data: [] }],
-      "csr_projects.select": [{ data: [] }],
+      "csr_projects.select": [{ data: [{ id: "proj-assigned", title: "Assigned" }] }],
     });
 
     const response = await projectsGet(
       withSessionCookie(
         new NextRequest("http://field.test/api/projects", {
-          headers: { "x-device-id": "dev-fo-1" },
         }),
         token
       )
     );
-    // Device binding is not an authorization gate; any-device auth is allowed.
     expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      data: [expect.objectContaining({ id: "proj-assigned" })],
+    });
   });
 
   it("does not treat Field Officer sessions as NGO admin for bare evidence posts", async () => {
@@ -544,7 +499,6 @@ describe("Field Officer session enforcement", () => {
       withSessionCookie(
         new NextRequest("http://field.test/api/evidence", {
           method: "POST",
-          headers: { "x-device-id": "dev-fo-1" },
           body: form,
         }),
         token

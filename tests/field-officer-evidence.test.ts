@@ -50,7 +50,6 @@ function foSession(overrides: Record<string, unknown> = {}) {
     role: "field_officer" as const,
     issuedAt: now,
     expiresAt: now + 60 * 60 * 1000,
-    deviceId: "dev-fo-1",
     createdAt: new Date(now).toISOString(),
     identityId: "fo-1",
     mustChangePassword: false,
@@ -73,21 +72,6 @@ function identity(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function device(overrides: Record<string, unknown> = {}) {
-  return {
-    id: "fd-1",
-    device_id: "dev-fo-1",
-    ngo_user_id: 21,
-    assigned_user_id: 90,
-    device_label: "Handset",
-    status: "active",
-    registered_at: "2026-11-01T00:00:00Z",
-    last_seen_at: null,
-    revoked_at: null,
-    ...overrides,
-  };
-}
-
 function withCookie(request: NextRequest, token: string) {
   request.cookies.set(SESSION_COOKIE_NAME, token);
   return request;
@@ -96,7 +80,6 @@ function withCookie(request: NextRequest, token: string) {
 function evidenceRequest(options: {
   data?: Record<string, unknown>;
   token?: string;
-  deviceHeader?: string;
   files?: File[];
 } = {}) {
   const bytes = Buffer.from("abcd");
@@ -112,7 +95,6 @@ function evidenceRequest(options: {
       data: {
         milestoneId: "m-1",
         projectId: "p-1",
-        deviceId: "dev-fo-1",
         notes: "Site visit complete",
         gpsLat: 19.1,
         gpsLng: 72.8,
@@ -130,14 +112,12 @@ function evidenceRequest(options: {
   }
   const headers: Record<string, string> = {
     cookie: `navadrishti_session=${options.token ?? "valid"}`,
-    "x-device-id": options.deviceHeader ?? "dev-fo-1",
   };
   return new NextRequest("http://field.test/api/evidence", { method: "POST", body: form, headers });
 }
 
 function baseFoAuthSelects(overrides: {
   identity?: Record<string, unknown>;
-  device?: Record<string, unknown> | null;
   assignments?: unknown[];
   project?: Record<string, unknown> | null;
 } = {}) {
@@ -167,8 +147,6 @@ function baseFoAuthSelects(overrides: {
       },
     ],
     "ngo_field_officer_identities.select": [{ data: identity(overrides.identity) }],
-    "field_devices.select": [{ data: overrides.device === null ? null : device(overrides.device) }],
-    "field_devices.update": [{ data: { id: "fd-1" } }],
     "ngo_field_officer_project_assignments.select": [
       { data: overrides.assignments ?? [{ project_id: "p-1", status: "active", ngo_user_id: 21 }] },
     ],
@@ -218,6 +196,7 @@ describe("Field Officer evidence submission", () => {
       project_id: "p-1",
       uploaded_by: 90,
       ngo_user_id: 21,
+      device_id: "unknown",
       submission_status: "submitted",
     });
     expect(evidenceInsert.payload as Record<string, unknown>).toMatchObject({
@@ -252,10 +231,10 @@ describe("Field Officer evidence submission", () => {
     expect(fake.find("csr_milestone_evidence", "insert")).toHaveLength(0);
   });
 
-  it("allows evidence when a legacy device row is revoked (device ID is metadata only)", async () => {
-    const token = createSessionToken(foSession({ deviceId: "other-handset" }));
+  it("submits assigned evidence without device metadata", async () => {
+    const token = createSessionToken(foSession());
     fake.reset({
-      ...baseFoAuthSelects({ device: { status: "revoked", revoked_at: "2026-11-01T00:00:00Z" } }),
+      ...baseFoAuthSelects(),
       "field_events.select": [...emptyChainSelects],
       "csr_project_milestones.select": [{ data: milestone }, { data: [milestone] }],
       "csr_milestone_evidence.select": [{ data: null }],
@@ -265,11 +244,10 @@ describe("Field Officer evidence submission", () => {
       "csr_project_milestones.update": [{ data: { id: "m-1", status: "submitted" } }],
       "field_events.insert": [{ data: { id: "fe-fo-revoked-meta" } }],
     });
-    const response = await evidencePost(
-      withCookie(evidenceRequest({ token, deviceHeader: "other-handset", data: { deviceId: "other-handset" } }), token)
-    );
+    const response = await evidencePost(withCookie(evidenceRequest({ token }), token));
     expect(response.status).toBe(200);
     expect(fake.find("csr_milestone_evidence", "insert")).toHaveLength(1);
+    expect(fake.find("field_devices", "select")).toHaveLength(0);
   });
 
   it("rejects unassigned project", async () => {
@@ -417,9 +395,7 @@ describe("Field Officer project listing for evidence", () => {
 
     const response = await projectsGet(
       withCookie(
-        new NextRequest("http://field.test/api/projects", {
-          headers: { "x-device-id": "dev-fo-1" },
-        }),
+        new NextRequest("http://field.test/api/projects"),
         token
       )
     );

@@ -171,7 +171,6 @@ describe("processSyncQueue", () => {
       milestoneId: "m-1",
       status: "pending",
       submittedAtDevice: "2026-09-28T10:00:00.000Z",
-      deviceId: "dev",
       userName: "NGO",
       gpsLat: 19,
       gpsLng: 72,
@@ -206,6 +205,9 @@ describe("processSyncQueue", () => {
     expect(db.syncQueue.rows.size).toBe(0);
     expect(db.recordsLocal.rows.get("rec-media")?.status).toBe("synced");
     expect(db.mediaLocal.rows.has("media-1")).toBe(false);
+    const formData = apiFetch.mock.calls[0][1].body as FormData;
+    const payload = JSON.parse(String(formData.get("payload")));
+    expect(payload.data).not.toHaveProperty("deviceId");
   });
 
   it("retries evidence when the server returns a chain-tip 409 (not treated as success)", async () => {
@@ -219,7 +221,6 @@ describe("processSyncQueue", () => {
       milestoneId: "m-1",
       status: "pending",
       submittedAtDevice: "2026-09-28T10:00:00.000Z",
-      deviceId: "dev",
       userName: "NGO",
       gpsLat: 19,
       gpsLng: 72,

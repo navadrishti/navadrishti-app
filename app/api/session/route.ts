@@ -64,21 +64,12 @@ export async function GET(request: NextRequest) {
 
       session = evaluation.session;
       const profile = await loadProfile(Number(session.id), session.name);
-      const clientDeviceId = request.headers.get("x-device-id");
       const response = NextResponse.json({
         configured: hasServerEnv(),
         missingEnv,
         session,
         profile,
         mustChangePassword: Boolean(session.mustChangePassword),
-        device: {
-          authorised: true,
-          code: null,
-          error: null,
-          deviceId: clientDeviceId || session.deviceId || null,
-          label: null,
-          status: "unbound",
-        },
       });
       setSessionCookie(response, session);
       return response;

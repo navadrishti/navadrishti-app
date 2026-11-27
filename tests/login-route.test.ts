@@ -53,7 +53,7 @@ function loginRequest(password = "correct-horse") {
   return new NextRequest("http://field.test/api/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: "ngo@example.org", password, device_id: "dev-1" }),
+    body: JSON.stringify({ email: "ngo@example.org", password }),
   });
 }
 
@@ -113,7 +113,6 @@ describe("POST /api/login", () => {
         body: JSON.stringify({
           email: "individual@example.org",
           password: "correct-horse",
-          device_id: "dev-1",
         }),
       })
     );

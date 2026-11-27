@@ -4,9 +4,10 @@ Installable Next.js PWA for NGO / individual field attendance and evidence captu
 Hosted separately from the main GRAM platform; shares the same Supabase project.
 
 Offline evidence and attendance are stored in IndexedDB and synchronized while the
-app is open and online. Failed submissions can be retried or discarded from the
-recent device history; the browser does not upload queued media after the app is
-terminated.
+app is open and online. Queue ownership follows the signed-in user; no device
+registration or installation ID is required. Failed submissions can be retried or
+discarded from local history; the browser does not upload queued media after the
+app is terminated.
 
 ## Local
 
